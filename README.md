@@ -1,5 +1,14 @@
 # UnReflect Batch
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Upstream: UnReflectAnything](https://img.shields.io/badge/upstream-UnReflectAnything-blue)](https://github.com/alberto-rota/UnReflectAnything)
+[![3DGS: LichtFeld Studio](https://img.shields.io/badge/3DGS-LichtFeld%20Studio-orange)](https://github.com/MrNeRF/LichtFeld-Studio)
+
+> **Independent wrapper.** This project is an independent batch wrapper for
+> [UnReflectAnything](https://github.com/alberto-rota/UnReflectAnything) — it is **not
+> affiliated with or endorsed by** the original authors, and bundles **none** of their
+> code (the model is installed from PyPI and called via its public API/CLI).
+
 Batch-remove **specular reflections / blown-out highlights** from input photos using
 [**UnReflectAnything**](https://alberto-rota.github.io/UnReflectAnything/), as a
 **pre-processing step for 3D Gaussian Splatting (3DGS) and photogrammetry**
