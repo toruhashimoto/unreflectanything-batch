@@ -148,6 +148,13 @@ Full options:
 | `--mask-composite` | off | **Wrapper full-res composite**: keeps the original full-resolution pixels everywhere except blown highlights — **best for high-resolution SfM/3DGS input** |
 | `--mask-level` | `248` | mask-composite: only replace pixels brighter than this luma 0-255 (higher = tighter = less blur) |
 | `--mask-dilation` | `0` | mask-composite: grow the replaced region N px (keep small; large values blur the subject) |
+| `--realityscan` | off | **Emit RealityScan alignment masks**: a copy of each *original* image + a `‹name›.mask.png` exclusion mask (black = reflection the model removed = excluded; white = kept) into `realityscan/`. See [RealityScan masks](#7b-realityscan-alignment-masks) |
+| `--rs-gate` | `250` | RealityScan mask: only mask pixels whose *original* luma ≥ this (0–255; 0 = off). Tight by default so diffuse-bright surfaces aren't excluded; lower to ~240 for a glary set |
+| `--rs-drop` | `12` | RealityScan mask: min luma the model must darken a pixel by to count it as a removed reflection |
+| `--rs-dilation` | `2` | RealityScan mask: grow the excluded region N px (cover reflection halos; keep small) |
+| `--rs-open` | `1` | RealityScan mask: remove specks smaller than this radius (morphological open) |
+| `--rs-masks-only` | off | RealityScan: write only the `.mask.png` files (don't copy the originals). The folder is then **not** directly importable — merge each mask into its photo's folder first |
+| `--rs-separator` | `.` | RealityScan mask name separator before `mask` (one of `. _ @ # !`) |
 | `--exiftool` | off | Copy **all** metadata via exiftool when available (maker notes/GPS/XMP, all formats; slower, per-file). Default = fast piexif/PIL EXIF |
 | `--verbose` | off | Show the engine's own per-image output |
 | `--limit N` | — | **Test mode**: process only the first N images |
@@ -173,6 +180,7 @@ Full options:
 ├── preview_compare/                      # [Original | UnReflect | (Diff)] strips  (--make-preview)
 ├── heatmap/                              # luma-difference heatmaps               (--heatmap)
 ├── masks/                                # changed-region masks                   (--emit-mask)
+├── realityscan/                          # original copies + ‹name›.mask.png      (--realityscan)
 └── logs/
     ├── process_log.jsonl                 # one detailed JSON record per image
     ├── process_log.csv                   # flat summary table
@@ -192,12 +200,70 @@ parameters used, the evaluation metrics, and any error.
 - **Highlight-pixel ratio** (before/after) — fraction of near-clipped pixels; the core
   signal for "did it remove blown highlights".
 - **Diff heatmap** (`--heatmap`) — where, and how strongly, the image was altered.
-- **Change mask** (`--emit-mask`) — a binary mask of altered regions you can hand to
-  COLMAP to **exclude** those pixels from feature matching (safer than trusting
-  hallucinated fill for geometry).
+- **Change mask** (`--emit-mask`) — a binary mask of *altered* regions (255 = changed), a
+  quick visualization of what the model touched. For an actual SfM feature-**exclusion**
+  mask (black = excluded), use [`--realityscan`](#7b-realityscan-alignment-masks) or
+  `tools/make_colmap_masks.py` — those write the correct polarity and naming.
 - **Test mode** (`--limit N`) — try a handful of images first.
 - **Quick mode** (`--max-size PX`) — downscale to test speed/quality fast (not for real
   reconstruction — it changes dimensions).
+
+---
+
+## 7b. RealityScan alignment masks
+
+Instead of *replacing* reflections in the photos, you can keep the originals untouched and
+hand **RealityScan** a per-image **mask** that excludes the reflective pixels from feature
+detection. For alignment this is usually the better move — the surrounding pixels keep
+their exact descriptors and geometry, and only the unreliable, view-dependent reflection
+is ignored (see [§9b](#9b-ab-evaluation-pipelines-optional)).
+
+Enable it in the GUI (sidebar → **RealityScan alignment masks**) or with `--realityscan`:
+
+```powershell
+python main.py --input "D:\photo_input" --output "D:\photo_unreflect" --recursive --realityscan
+```
+
+This writes a **ready-to-import folder** at `‹output›\realityscan\` containing, for every
+photo, a byte-exact copy of the **original** image plus its mask:
+
+```
+realityscan\
+├── IMG_1234.jpg                # copy of the original (unmodified; input is never touched)
+└── IMG_1234.jpg.mask.png       # 8-bit grayscale, BLACK = reflection (excluded), WHITE = kept
+```
+
+The mask marks where the **model removed a blown highlight** (a pixel the network darkened,
+gated to near-blown luma by default so bright *diffuse* surfaces — sky, white paint,
+light-coloured bodywork — are **not** excluded). It is strictly binary (0/255, hard edges),
+at the photo's native resolution.
+
+**Load it in RealityScan** (verified against RealityScan 2.x; unchanged from RealityCapture —
+[docs](https://rshelp.capturingreality.com/en-US/tools/mask.htm)):
+
+1. **WORKFLOW → Inputs → Folder** and pick `‹output›\realityscan` so the photos **and**
+   masks import **together** (the `.mask` layer auto-attaches by name; import them
+   separately and RealityScan treats the masks as extra photos instead).
+2. Select the images → **Selected Input → Image Layers** → tick **“Enable masks for
+   alignment.”** (It's an independent per-stage toggle — not implied by meshing/texturing.)
+3. Run alignment.
+
+> Mask polarity is the part people get wrong: RealityScan uses **white = kept, black =
+> excluded** (*"In a mask, white areas will be used in processing, while black areas are
+> excluded."*). This tool already emits that polarity — there's no invert toggle on import.
+
+Tuning: raise `--rs-gate` (e.g. `252`) to preserve more features, lower it (e.g. `240`) to
+catch more reflection on a genuinely glary set; `--rs-dilation` grows the excluded region
+to cover halos. The run prints the **average % of pixels excluded** — if it's large
+(>~12 %), you're probably masking diffuse-bright areas, and the set likely reconstructs
+best from the **originals** with no mask at all.
+
+**No GPU / no weights?** `tools/make_realityscan_masks.py` produces the same importable
+folder with a pure brightness threshold (no model):
+
+```powershell
+python tools\make_realityscan_masks.py -i "D:\photo_input" -o "D:\rs_project" --level 250 --dilation 2
+```
 
 ---
 
@@ -226,8 +292,10 @@ parameters used, the evaluation metrics, and any error.
 2. Run UnReflect Batch with `--make-preview --heatmap` and **look at the previews** — does
    it cleanly remove highlights, or invent texture? Invented detail that differs per view
    hurts SfM.
-3. Consider **`--composite`** (changes only highlight regions) and/or **`--emit-mask`**
-   (feed the mask to COLMAP to exclude altered regions from matching).
+3. Consider **`--mask-composite`** (changes only highlight regions) and/or — better for
+   alignment — an **exclusion mask** (`--realityscan` for RealityScan, or
+   `tools/make_colmap_masks.py` for COLMAP) that ignores the reflective pixels without
+   altering the image.
 4. **A/B test:** reconstruct with the originals and with the cleaned set; keep whichever
    gives better registration / fewer artifacts. Note that some 3DGS variants *model*
    reflections rather than needing them removed. Use the bundled harness:
@@ -329,13 +397,16 @@ UnReflectAnything/
 ├── scripts/setup_env.ps1   # environment installer (venv + cu128 torch + deps + weights)
 ├── src/
 │   ├── image_io.py         # discovery + EXIF/format-preserving I/O
-│   ├── metrics.py          # luminance / highlight metrics, heatmap, change mask
+│   ├── metrics.py          # luminance / highlight metrics, heatmap, change & exclusion masks
 │   ├── preview.py          # before/after compare composites
+│   ├── realityscan.py      # RealityScan mask naming / polarity / PNG writing helpers
 │   ├── logger.py           # JSONL / CSV / errors / summary
 │   └── unreflect_batch.py  # engine: device select, model load, per-image pipeline
 ├── tools/
 │   ├── ab_colmap.py        # A/B COLMAP sparse-reconstruction comparison (original vs cleaned)
-│   └── ab_3dgs.py          # A/B 3D Gaussian Splatting comparison (COLMAP -> LichtFeld -> figures)
+│   ├── ab_3dgs.py          # A/B 3D Gaussian Splatting comparison (COLMAP -> LichtFeld -> figures)
+│   ├── make_colmap_masks.py       # luma-gated COLMAP exclusion masks (no model)
+│   └── make_realityscan_masks.py  # luma-gated RealityScan import folder (no model)
 └── tests/                  # fast unit tests (no torch needed)
 ```
 
