@@ -5,6 +5,8 @@
 [![Upstream: UnReflectAnything](https://img.shields.io/badge/upstream-UnReflectAnything-blue)](https://github.com/alberto-rota/UnReflectAnything)
 [![3DGS: LichtFeld Studio](https://img.shields.io/badge/3DGS-LichtFeld%20Studio-orange)](https://github.com/MrNeRF/LichtFeld-Studio)
 
+**English** · [日本語 (Japanese)](README.ja.md)
+
 > **Independent wrapper.** This project is an independent batch wrapper for
 > [UnReflectAnything](https://github.com/alberto-rota/UnReflectAnything) — it is **not
 > affiliated with or endorsed by** the original authors, and bundles **none** of their
@@ -103,6 +105,11 @@ There is **no auto-download**; you must fetch the weights once (~5.9 GB):
 Weights are cached under `%LOCALAPPDATA%\unreflectanything\weights` and reused by every
 run. (The setup script does this for you unless you passed `-SkipWeights`.)
 
+You can also let the tools fetch them: pass **`--download-weights`** to `main.py`, or click
+**"Download model weights"** in the GUI sidebar. If weights are missing, the tools fail
+fast with a clear message pointing at the exact command and cache location (no silent
+mid-run crash).
+
 ---
 
 ## 4. Usage — GUI
@@ -143,6 +150,7 @@ Full options:
 | `--verbose` | off | Show the engine's own per-image output |
 | `--limit N` | — | **Test mode**: process only the first N images |
 | `--max-size PX` | — | **Quick mode**: downscale longest side before processing (⚠ changes output dims — not for COLMAP input) |
+| `--download-weights` | off | Download the ~5.9 GB weights first if missing, then run |
 | `--dry-run` | off | List what would be processed, run nothing |
 | `--no-progress` | off | Disable the progress bar |
 

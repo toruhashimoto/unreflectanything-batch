@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: UnReflectAnything (the reflection-removal model)
+    url: https://github.com/alberto-rota/UnReflectAnything/issues
+    about: For problems with the model or its weights themselves (not this wrapper).
+  - name: LichtFeld Studio (the 3DGS trainer)
+    url: https://github.com/MrNeRF/LichtFeld-Studio/issues
+    about: For problems with the 3D Gaussian Splatting trainer used by tools/ab_3dgs.py.
+  - name: COLMAP
+    url: https://github.com/colmap/colmap/issues
+    about: For problems with COLMAP itself (used by the A/B harnesses).

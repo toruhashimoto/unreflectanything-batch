@@ -21,7 +21,7 @@ import streamlit as st  # noqa: E402
 from src.image_io import SUPPORTED_EXTS  # noqa: E402
 from src.unreflect_batch import (  # noqa: E402
     BatchConfig, run_batch, resolve_device, load_model,
-    WeightsMissingError, ModelLoadError,
+    WeightsMissingError, ModelLoadError, weights_status, download_weights,
 )
 
 
@@ -99,6 +99,18 @@ with st.sidebar:
     dilation = st.slider("Mask dilation (px)", 0, 120, 40, 5)
     jpeg_quality = st.slider("JPEG quality", 80, 100, 95, 1)
     exts = st.multiselect("Extensions", list(SUPPORTED_EXTS), default=list(SUPPORTED_EXTS))
+
+    st.divider()
+    with st.expander("Model weights (~5.9 GB, required once)"):
+        if st.button("⬇ Download model weights"):
+            with st.spinner("Downloading weights (one time, ~5.9 GB)…"):
+                try:
+                    wdir = download_weights(progress=False)
+                    st.success(f"Weights ready: {wdir}")
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"Download failed: {e}")
+        st.caption("Or run `unreflectanything download --weights` in a terminal. "
+                   "There is no automatic download.")
 
 run = st.button("▶ Run batch", type="primary", use_container_width=True)
 

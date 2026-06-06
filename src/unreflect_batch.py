@@ -43,6 +43,51 @@ class ModelLoadError(RuntimeError):
     """Raised when the checkpoint cannot be loaded (e.g. transformers mismatch)."""
 
 
+WEIGHTS_DOWNLOAD_CMD = "unreflectanything download --weights"
+
+
+def weights_status() -> tuple[bool, Optional[Path], str]:
+    """Return (available, weights_dir, human_detail) for the pretrained weights."""
+    try:
+        import unreflectanything as unreflect
+    except Exception as e:  # noqa: BLE001
+        return False, None, f"unreflectanything is not importable: {e}"
+    try:
+        wdir = Path(unreflect.cache("weights"))
+    except Exception as e:  # noqa: BLE001
+        return False, None, f"could not resolve the weights cache dir: {e}"
+    pts = sorted(wdir.glob("*.pt")) if wdir.exists() else []
+    if pts:
+        total_mb = sum(p.stat().st_size for p in pts) / 1e6
+        return True, wdir, f"{len(pts)} weight file(s), {total_mb:.0f} MB, in {wdir}"
+    return False, wdir, f"no .pt weights found in {wdir}"
+
+
+def weights_missing_message(wdir: Optional[Path] = None) -> str:
+    """A friendly, actionable message for when weights aren't downloaded yet."""
+    if wdir is None:
+        wdir = weights_status()[1]
+    loc = f"\n  Cache location : {wdir}" if wdir else ""
+    return (
+        "Pretrained model weights are not downloaded yet (~5.9 GB, one time).\n"
+        f"  Download them : {WEIGHTS_DOWNLOAD_CMD}\n"
+        "  Or pass --download-weights to fetch them now (CLI), or use the GUI's "
+        '"Download model weights" button.'
+        f"{loc}\n"
+        "  (Weights are required to run — there is NO automatic download.)"
+    )
+
+
+def download_weights(progress: bool = True) -> Path:
+    """Download the pretrained weights via the package API. Returns the weights dir."""
+    import unreflectanything as unreflect
+
+    if progress:
+        print(f"Downloading UnReflectAnything weights (~5.9 GB) — one time...", flush=True)
+    unreflect.download("weights")
+    return Path(unreflect.cache("weights"))
+
+
 @dataclass
 class BatchConfig:
     input_dir: Path
@@ -144,11 +189,7 @@ def load_model(device: str):
     try:
         return unreflect.model(pretrained=True, device=device)
     except FileNotFoundError as e:
-        raise WeightsMissingError(
-            "Pretrained weights not found. Download them once with:\n"
-            "    unreflectanything download --weights\n"
-            f"(original error: {e})"
-        ) from e
+        raise WeightsMissingError(weights_missing_message()) from e
     except RuntimeError as e:
         msg = str(e)
         if "state_dict" in msg or "Missing key" in msg or "Unexpected key" in msg:
@@ -371,6 +412,9 @@ def run_batch(
         return summary
 
     if model is None and not cfg.dry_run:
+        ok, wdir, _ = weights_status()  # friendly, fast preflight before the slow load
+        if not ok:
+            raise WeightsMissingError(weights_missing_message(wdir))
         model = load_model(device)  # may raise WeightsMissingError / ModelLoadError
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="unreflect_", dir=str(cfg.output_dir / "logs")))

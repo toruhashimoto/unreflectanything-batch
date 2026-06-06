@@ -70,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mask-composite", action="store_true", help="wrapper FULL-RES composite: keep original detail everywhere except blown highlights (best for high-res SfM/3DGS input)")
     p.add_argument("--exiftool", action="store_true", help="copy ALL metadata via exiftool when available (maker notes/GPS/XMP, all formats; slower, per-file). Default uses fast piexif/PIL EXIF.")
     p.add_argument("--verbose", action="store_true", help="show the engine's own per-image stdout")
+    p.add_argument("--download-weights", action="store_true", help="download the ~5.9 GB model weights first if they are missing, then run")
 
     # Test / quick modes.
     p.add_argument("--limit", type=int, default=None, metavar="N", help="test mode: process only the first N images")
@@ -83,7 +84,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     # Import the engine lazily so --help works even before torch is installed.
-    from src.unreflect_batch import BatchConfig, run_batch, WeightsMissingError, ModelLoadError
+    from src.unreflect_batch import (
+        BatchConfig, run_batch, WeightsMissingError, ModelLoadError,
+        weights_status, download_weights,
+    )
 
     exts = tuple(e for e in (args.extensions or "").replace(" ", ",").split(",") if e)
     cfg = BatchConfig(
@@ -108,6 +112,18 @@ def main(argv: list[str] | None = None) -> int:
         verbose=args.verbose,
         dry_run=args.dry_run,
     )
+
+    if args.download_weights:
+        ok, _, detail = weights_status()
+        if ok:
+            print(f"[weights] already present: {detail}")
+        else:
+            try:
+                wdir = download_weights()
+                print(f"[weights] downloaded to {wdir}")
+            except Exception as e:  # noqa: BLE001
+                print(f"\n[ERROR] weights download failed: {e}", file=sys.stderr)
+                return 3
 
     try:
         summary = run_batch(cfg, progress=not args.no_progress)
