@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unreflectanything-batch"
+version = "0.1.0"
+description = "Batch specular-reflection / highlight removal (UnReflectAnything) for 3D Gaussian Splatting and photogrammetry input photos."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Toru Hashimoto" }]
+keywords = ["3d-gaussian-splatting", "gaussian-splatting", "photogrammetry",
+            "reflection-removal", "highlight-removal", "colmap", "unreflectanything"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: Multimedia :: Graphics",
+]
+
+# NOTE: torch / torchvision are intentionally NOT listed here. On Windows the default
+# PyPI torch wheel is CPU-only, and Blackwell (sm_120) needs the CUDA build. Install
+# them FIRST from the PyTorch index (see README "2. Setup"):
+#   pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu128
+dependencies = [
+  "unreflectanything==1.1.1",
+  # Pinned transformers commit required by the checkpoint (see README trap #2).
+  "transformers @ https://github.com/huggingface/transformers/archive/2fe43376cdde02b7ffcf117e6eb9aa4375fb2dd1.zip",
+  "piexif==1.1.3",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+gui = ["streamlit>=1.40"]
+dev = ["pytest>=7", "pillow", "numpy"]
+
+[project.scripts]
+unreflect-batch = "main:main"
+
+[project.urls]
+Homepage = "https://github.com/toruhashimoto/unreflectanything-batch"
+Issues = "https://github.com/toruhashimoto/unreflectanything-batch/issues"
+
+[tool.setuptools]
+py-modules = ["main"]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

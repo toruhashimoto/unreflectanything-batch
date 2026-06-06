@@ -1,5 +1,6 @@
 # UnReflect Batch
 
+[![CI](https://github.com/toruhashimoto/unreflectanything-batch/actions/workflows/ci.yml/badge.svg)](https://github.com/toruhashimoto/unreflectanything-batch/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Upstream: UnReflectAnything](https://img.shields.io/badge/upstream-UnReflectAnything-blue)](https://github.com/alberto-rota/UnReflectAnything)
 [![3DGS: LichtFeld Studio](https://img.shields.io/badge/3DGS-LichtFeld%20Studio-orange)](https://github.com/MrNeRF/LichtFeld-Studio)
@@ -26,6 +27,16 @@ drops straight into your existing SfM/3DGS pipeline.
 > to **improve a problematic photo set for visualization/quality experiments**, not as
 > measurement ground truth. Always A/B test your reconstruction *with vs. without* the
 > cleaned images. See [Recommended workflow](#recommended-workflow-for-3dgs--photogrammetry).
+
+---
+
+## Demo
+
+![before / after / diff](examples/demo_before_after.jpg)
+
+*A synthetic scene with specular glare → `--mask-composite` → diff heatmap. Originals are
+never modified; only blown-highlight regions change, and the heatmap shows exactly what.
+More (and how to reproduce) in [`examples/`](examples/).*
 
 ---
 

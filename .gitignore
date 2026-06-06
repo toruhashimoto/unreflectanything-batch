@@ -13,6 +13,8 @@ venv/
 .verify/
 .tools/
 ab_demo/
+# regenerable synthetic demo input (see examples/make_demo.py)
+examples/assets/
 
 # Tool outputs / data (never commit photos or generated results)
 output/
