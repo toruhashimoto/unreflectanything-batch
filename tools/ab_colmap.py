@@ -89,7 +89,8 @@ _MATCHERS = {
 
 
 def reconstruct(name: str, images: Path, work: Path, colmap: str, camera_model: str,
-                matcher: str = "exhaustive", max_image_size: int = 0) -> dict:
+                matcher: str = "exhaustive", max_image_size: int = 0,
+                mask_path: Path | None = None) -> dict:
     sdir = work / name
     sdir.mkdir(parents=True, exist_ok=True)
     log = sdir / "colmap.log"
@@ -112,6 +113,11 @@ def reconstruct(name: str, images: Path, work: Path, colmap: str, camera_model: 
               "--FeatureExtraction.use_gpu", "0"]
     if max_image_size and max_image_size > 0:
         fe_cmd += ["--FeatureExtraction.max_image_size", str(max_image_size)]
+    if mask_path is not None:
+        # COLMAP ignores black (0) pixels in <mask_path>/<image_name>.png — i.e. no
+        # features are detected there. Used to exclude reflection regions WITHOUT
+        # altering the image (keeps surrounding features at their original descriptors).
+        fe_cmd += ["--ImageReader.mask_path", str(mask_path)]
     code, _ = run(fe_cmd, log)
     if code != 0:
         return {"name": name, "n_input": n_imgs, "error": "feature_extractor failed", "seconds": round(time.perf_counter() - t0, 1)}
@@ -156,7 +162,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="A/B COLMAP sparse reconstruction comparison")
     ap.add_argument("--work", required=True, type=Path, help="working dir for COLMAP outputs")
     ap.add_argument("--set", nargs=2, action="append", metavar=("NAME", "DIR"),
-                    required=True, help="a named image set, e.g. --set original D:\\imgs")
+                    default=[], help="a named image set, e.g. --set original D:\\imgs")
+    ap.add_argument("--set-masked", nargs=3, action="append", default=[],
+                    metavar=("NAME", "IMAGES", "MASKS"),
+                    help="a named image set with a COLMAP mask dir (excludes masked "
+                         "regions from feature detection without altering the images)")
     ap.add_argument("--colmap", default=None, help="path to colmap.exe (else PATH or .tools)")
     ap.add_argument("--camera-model", default="SIMPLE_RADIAL")
     ap.add_argument("--matcher", default="exhaustive", choices=list(_MATCHERS),
@@ -169,12 +179,19 @@ def main(argv=None) -> int:
     args.work.mkdir(parents=True, exist_ok=True)
     print(f"colmap: {colmap}")
 
+    jobs = [(n, Path(d), None) for n, d in args.set]
+    jobs += [(n, Path(img), Path(msk)) for n, img, msk in args.set_masked]
+    if not jobs:
+        raise SystemExit("provide at least one --set or --set-masked")
+
     results = []
-    for name, d in args.set:
-        print(f"\n=== reconstructing '{name}' from {d} ===")
+    for name, d, mask in jobs:
+        tag = f"{d}" + (f"  (mask: {mask})" if mask else "")
+        print(f"\n=== reconstructing '{name}' from {tag} ===")
         try:
-            r = reconstruct(name, Path(d), args.work, colmap, args.camera_model,
-                            matcher=args.matcher, max_image_size=args.max_image_size)
+            r = reconstruct(name, d, args.work, colmap, args.camera_model,
+                            matcher=args.matcher, max_image_size=args.max_image_size,
+                            mask_path=mask)
         except Exception as e:  # noqa: BLE001 - one set failing must not kill the rest
             r = {"name": name, "n_input": None, "error": f"{type(e).__name__}: {e}", "seconds": None}
         if "error" in r:
