@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unreflectanything-batch"
-version = "0.1.1"
+version = "0.1.2"
 description = "Batch specular-reflection / highlight removal (UnReflectAnything) for 3D Gaussian Splatting and photogrammetry input photos."
 readme = "README.md"
 requires-python = ">=3.11"

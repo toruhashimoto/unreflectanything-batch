@@ -7,4 +7,4 @@ unreflectanything, keeping unit tests fast and dependency-free. Heavy imports
 (torch, unreflectanything) are done lazily inside `unreflect_batch`.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
