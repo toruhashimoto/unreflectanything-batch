@@ -105,9 +105,9 @@ def diff_heatmap(before: np.ndarray, after: np.ndarray) -> np.ndarray:
 def luminance_composite(
     original: np.ndarray,
     diffuse: np.ndarray,
-    level: float = DEFAULT_HIGHLIGHT_LEVEL,
-    dilation: int = 8,
-    feather: float = 4.0,
+    level: float = 248.0,
+    dilation: int = 0,
+    feather: float = 1.0,
 ) -> np.ndarray:
     """Full-resolution, highlight-gated composite.
 
@@ -116,6 +116,12 @@ def luminance_composite(
     result. This preserves full-resolution detail (important for SfM/3DGS) while
     still suppressing blown highlights — a workaround for the model's ~448 px
     internal resolution softening high-res inputs. Returns (H, W, 3) uint8.
+
+    Keep this gate TIGHT. ``dilation`` grows the replaced region by that many pixels
+    in every direction, so a large value (e.g. the model's inpaint dilation of 40)
+    balloons even small bright specks into big soft blobs and blurs the subject.
+    Defaults replace only near-blown pixels with a 1 px feather. Lower ``level`` and
+    raise ``dilation`` only if you specifically need to clean larger glare areas.
     """
     orig = np.asarray(original, dtype=np.float32)
     diff = np.asarray(diffuse, dtype=np.float32)

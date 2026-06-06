@@ -131,6 +131,8 @@ python main.py --input "D:\photo_input" --output "D:\photo_unreflect" --recursiv
 | `--emit-mask` | off | 変更領域マスクを `masks/` に保存（COLMAP の除外マスク用） |
 | `--composite` | off | モデル内部 composite（約 448px で合成、全体はソフト化されたまま） |
 | `--mask-composite` | off | **ラッパーのフル解像度 composite**：白飛び以外は原寸のまま保持（**高解像度の SfM/3DGS 入力に最適**） |
+| `--mask-level` | `248` | mask-composite：この輝度(0-255)より明るい画素のみ置換（高いほどタイト＝ボケにくい） |
+| `--mask-dilation` | `0` | mask-composite：置換領域を N px 膨張（小さく保つ。大きいと主役がボケる） |
 | `--exiftool` | off | exiftool があれば全メタデータを複写（メーカーノート/GPS/XMP・全形式・低速） |
 | `--verbose` | off | エンジン自身の出力を表示 |
 | `--overwrite` | off | 既存出力を上書き（既定はスキップ） |

@@ -68,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch-size", type=int, default=4, help="model batch size")
     p.add_argument("--composite", action="store_true", help="model's internal composite: blend diffuse into highlight regions at the model's ~448px resolution")
     p.add_argument("--mask-composite", action="store_true", help="wrapper FULL-RES composite: keep original detail everywhere except blown highlights (best for high-res SfM/3DGS input)")
+    p.add_argument("--mask-level", type=float, default=248.0, help="mask-composite: only replace pixels brighter than this luma 0-255 (higher = tighter = less blur)")
+    p.add_argument("--mask-dilation", type=int, default=0, help="mask-composite: grow the replaced region by N px (keep small; large values blur the subject)")
+    p.add_argument("--mask-feather", type=float, default=1.0, help="mask-composite: edge feather sigma in px")
     p.add_argument("--exiftool", action="store_true", help="copy ALL metadata via exiftool when available (maker notes/GPS/XMP, all formats; slower, per-file). Default uses fast piexif/PIL EXIF.")
     p.add_argument("--verbose", action="store_true", help="show the engine's own per-image stdout")
     p.add_argument("--download-weights", action="store_true", help="download the ~5.9 GB model weights first if they are missing, then run")
@@ -108,6 +111,9 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         composite=args.composite,
         mask_composite=args.mask_composite,
+        mask_composite_level=args.mask_level,
+        mask_composite_dilation=args.mask_dilation,
+        mask_composite_feather=args.mask_feather,
         use_exiftool=args.exiftool,
         verbose=args.verbose,
         dry_run=args.dry_run,

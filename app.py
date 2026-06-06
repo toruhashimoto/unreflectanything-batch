@@ -87,6 +87,10 @@ with st.sidebar:
                             help="Model's internal composite; whole image still softened on resize-back.")
     mask_composite = st.checkbox("Full-res composite (keep detail outside highlights)", value=False,
                                  help="Best for high-res input: only blown highlights are replaced; rest stays full-res.")
+    mask_level = st.slider("  ↳ mask level (higher = tighter, less blur)", 200, 255, 248, 1,
+                           help="Only pixels brighter than this (luma 0-255) are replaced. Raise if the result looks blurry.")
+    mask_dilation = st.slider("  ↳ mask grow px (keep small)", 0, 40, 0, 1,
+                              help="Grows the replaced area. Large values blur the subject — keep at 0-2.")
     use_exiftool = st.checkbox("Full metadata copy (exiftool)", value=False,
                                help="Copy ALL metadata via exiftool if installed; otherwise fast piexif/PIL EXIF.")
     overwrite = st.checkbox("Overwrite existing outputs", value=False)
@@ -136,6 +140,8 @@ if run:
         dilation=int(dilation),
         composite=composite,
         mask_composite=mask_composite,
+        mask_composite_level=float(mask_level),
+        mask_composite_dilation=int(mask_dilation),
         use_exiftool=use_exiftool,
     )
 

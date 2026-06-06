@@ -107,6 +107,13 @@ class BatchConfig:
     batch_size: int = 4
     composite: bool = False  # model's internal composite (blended at ~448px)
     mask_composite: bool = False  # wrapper full-res highlight-gated composite
+    # mask-composite gate (kept TIGHT: only truly-blown pixels are replaced, so the
+    # rest of the image stays at full original sharpness). The model's --dilation (40)
+    # is for its own inpaint mask and must NOT be reused here, or it balloons the
+    # replaced region and blurs the subject.
+    mask_composite_level: float = 248.0
+    mask_composite_dilation: int = 0
+    mask_composite_feather: float = 1.0
     use_exiftool: bool = False  # full metadata copy via exiftool (if available)
     verbose: bool = False  # let the engine's own stdout through
     highlight_level: float = metrics_mod.DEFAULT_HIGHLIGHT_LEVEL
@@ -125,6 +132,9 @@ class BatchConfig:
             "jpeg_quality": self.jpeg_quality,
             "composite": self.composite,
             "mask_composite": self.mask_composite,
+            "mask_composite_level": self.mask_composite_level,
+            "mask_composite_dilation": self.mask_composite_dilation,
+            "mask_composite_feather": self.mask_composite_feather,
             "max_size": self.max_size,
             "use_exiftool": self.use_exiftool,
         }
@@ -284,7 +294,9 @@ def process_one(
         if cfg.mask_composite:
             comp = metrics_mod.luminance_composite(
                 np.asarray(before_pil), np.asarray(after_pil),
-                level=cfg.highlight_level, dilation=cfg.dilation,
+                level=cfg.mask_composite_level,
+                dilation=cfg.mask_composite_dilation,
+                feather=cfg.mask_composite_feather,
             )
             after_pil = Image.fromarray(comp, "RGB")
 

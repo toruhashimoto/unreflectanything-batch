@@ -146,6 +146,8 @@ Full options:
 | `--dilation` | `40` | Highlight-mask dilation in px (model) |
 | `--composite` | off | Model's internal composite: blends diffuse into highlight regions at the model's ~448 px resolution (whole image is still softened on resize-back) |
 | `--mask-composite` | off | **Wrapper full-res composite**: keeps the original full-resolution pixels everywhere except blown highlights — **best for high-resolution SfM/3DGS input** |
+| `--mask-level` | `248` | mask-composite: only replace pixels brighter than this luma 0-255 (higher = tighter = less blur) |
+| `--mask-dilation` | `0` | mask-composite: grow the replaced region N px (keep small; large values blur the subject) |
 | `--exiftool` | off | Copy **all** metadata via exiftool when available (maker notes/GPS/XMP, all formats; slower, per-file). Default = fast piexif/PIL EXIF |
 | `--verbose` | off | Show the engine's own per-image output |
 | `--limit N` | — | **Test mode**: process only the first N images |
