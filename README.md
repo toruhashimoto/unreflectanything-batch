@@ -260,6 +260,22 @@ python tools\ab_colmap.py --work ab_work --matcher sequential --max-image-size 2
     --set original "D:\photo_input" --set cleaned "D:\photo_unreflect"
 ```
 
+**Mask-based exclusion — often better than removal for alignment.** For SfM you can
+*exclude* the reflective regions from feature detection instead of removing them. The
+images stay untouched, so the surrounding features keep their exact descriptors and
+geometric accuracy, and only the unreliable view-dependent reflection pixels are ignored.
+Generate masks and compare with `--set-masked`:
+```powershell
+python tools\make_colmap_masks.py -i "D:\photo_input" -o "D:\refl_masks" --level 240 --dilation 2
+python tools\ab_colmap.py --work ab_work --matcher sequential ^
+    --set original "D:\photo_input" ^
+    --set-masked masked "D:\photo_input" "D:\refl_masks"
+```
+Keep the mask **tight** — exclude only true reflections, not large bright *diffuse* areas
+(sky, white surfaces); over-masking removes feature-rich regions and can fragment the
+reconstruction. (Measured on real footage: tight masking preserved more 3D points **and**
+the original reprojection accuracy than inpaint-style removal.)
+
 ### 3DGS A/B — `tools/ab_3dgs.py`
 Full pipeline per set: **COLMAP → LichtFeld Studio headless training → eval renders →
 same-viewpoint comparison figures + report** (PSNR / SSIM / #Gaussians).

@@ -215,6 +215,15 @@ python tools\ab_colmap.py --work ab_work --matcher sequential --max-image-size 2
     --set original "D:\photo_input" --set cleaned "D:\photo_unreflect"
 ```
 
+**マスク除外 — アライメントでは「除去」より良いことが多い。** SfMでは反射領域を*除去*する代わりに、**特徴抽出から“除外”**できます。画像を改変しないので、周囲の特徴点は記述子・幾何精度をそのまま保ち、視点依存で不安定な反射画素だけを無視できます。`--set-masked` で生成・比較：
+```powershell
+python tools\make_colmap_masks.py -i "D:\photo_input" -o "D:\refl_masks" --level 240 --dilation 2
+python tools\ab_colmap.py --work ab_work --matcher sequential ^
+    --set original "D:\photo_input" ^
+    --set-masked masked "D:\photo_input" "D:\refl_masks"
+```
+マスクは**タイト**に — 実際の反射だけを除外し、空や白い面のような**明るい拡散面**まで消さないこと（除外し過ぎると特徴の宝庫を潰し、復元が分裂します）。実測では、タイトなマスク除外は除去（インペイント）より**3D点数も再投影精度も良好**でした。
+
 ### 3DGS の A/B — `tools/ab_3dgs.py`
 セットごとに **COLMAP → LichtFeld Studio ヘッドレス学習 → eval レンダー → 同一視点の比較図＋レポート**
 （PSNR/SSIM/ガウシアン数）。
