@@ -91,6 +91,19 @@ with st.sidebar:
                            help="Only pixels brighter than this (luma 0-255) are replaced. Raise if the result looks blurry.")
     mask_dilation = st.slider("  ↳ mask grow px (keep small)", 0, 40, 0, 1,
                               help="Grows the replaced area. Large values blur the subject — keep at 0-2.")
+    st.divider()
+    realityscan = st.checkbox("RealityScan alignment masks", value=False,
+                              help="Emit a ready-to-import folder under realityscan/: a copy of each ORIGINAL image + a '<name>.mask.png' exclusion mask (black=removed reflection=excluded). Best as an alignment pre-process — the originals stay untouched and only reflections are ignored.")
+    rs_copy_originals = st.checkbox("  ↳ copy original images next to masks", value=True,
+                                    help="RealityScan must import photos + masks together. Keep on to get a self-contained importable folder; turn off for masks-only.")
+    rs_gate = st.slider("  ↳ only mask pixels this bright (orig luma)", 0, 255, 250, 1,
+                        help="Only original pixels at/above this brightness can be masked (0 disables the gate). Tight by default so diffuse-bright surfaces (sky, white paint/bodywork) are NOT excluded; lower to ~240 for a genuinely glary set.")
+    rs_drop = st.slider("  ↳ min luma drop to count as reflection", 1, 80, 12, 1,
+                        help="A pixel is excluded only if the model darkened it by at least this much.")
+    rs_dilation = st.slider("  ↳ grow excluded region px", 0, 20, 2, 1,
+                            help="Covers reflection halos. Keep small — over-masking fragments the reconstruction.")
+    rs_open = st.slider("  ↳ remove specks radius", 0, 10, 1, 1,
+                        help="Morphological open: drops isolated tiny excluded specks.")
     use_exiftool = st.checkbox("Full metadata copy (exiftool)", value=False,
                                help="Copy ALL metadata via exiftool if installed; otherwise fast piexif/PIL EXIF.")
     overwrite = st.checkbox("Overwrite existing outputs", value=False)
@@ -142,6 +155,12 @@ if run:
         mask_composite=mask_composite,
         mask_composite_level=float(mask_level),
         mask_composite_dilation=int(mask_dilation),
+        realityscan=realityscan,
+        rs_copy_originals=rs_copy_originals,
+        rs_drop_level=float(rs_drop),
+        rs_highlight_gate=float(rs_gate),
+        rs_dilation=int(rs_dilation),
+        rs_open=int(rs_open),
         use_exiftool=use_exiftool,
     )
 
@@ -182,6 +201,47 @@ if run:
             st.subheader("Before / after samples")
             for p in previews:
                 st.image(str(p), caption=p.relative_to(prev_dir).as_posix(), use_container_width=True)
+
+    # RealityScan masks: show where they went + how to use them, plus samples.
+    if realityscan:
+        rs_dir = Path(output_dir) / "realityscan"
+        st.subheader("RealityScan alignment masks")
+        st.success(f"Mask folder: {rs_dir}")
+        mean_excl = summary.get("realityscan_mean_excluded_pct")
+        if mean_excl is not None:
+            st.metric("Avg pixels excluded", f"{mean_excl:.2f}%")
+            if mean_excl > 12:
+                st.warning(
+                    f"Excluding {mean_excl:.1f}% of pixels on average — likely over-masking "
+                    "diffuse-bright areas (sky, white paint/bodywork), not just reflections. "
+                    "Raise the brightness gate, or this set may simply not need masking "
+                    "(originals often reconstruct best for mild glare).",
+                    icon="⚠️",
+                )
+        if rs_copy_originals:
+            st.markdown(
+                f"**How to use in RealityScan** (masks exclude reflections from alignment; "
+                f"black = excluded, white = kept):\n"
+                f"1. In RealityScan, **WORKFLOW → Inputs → Folder** and pick `{rs_dir}` "
+                f"(this loads the photos **and** the `.mask.png` masks together so they auto-attach).\n"
+                f"2. Select the images → **Selected Input → Image Layers** → tick "
+                f"**“Enable masks for alignment.”**\n"
+                f"3. Run alignment. (Originals were copied unmodified; your input folder is untouched.)"
+            )
+        else:
+            st.markdown(
+                f"**Masks-only output** (black = excluded, white = kept). This folder has the "
+                f"`.mask.png` files but **no images**, so it is not directly importable:\n"
+                f"1. Merge each `‹name›.mask.png` into the **same folder as its photo**.\n"
+                f"2. Import the photos **and** masks together (**WORKFLOW → Inputs → Folder**).\n"
+                f"3. Select the images → **Selected Input → Image Layers** → tick "
+                f"**“Enable masks for alignment”** → run alignment."
+            )
+        rs_masks = sorted(rs_dir.rglob("*.mask.png"))[:4]
+        if rs_masks:
+            st.caption("Sample masks (black = reflection excluded):")
+            for p in rs_masks:
+                st.image(str(p), caption=p.relative_to(rs_dir).as_posix(), use_container_width=True)
 
     errs = Path(output_dir) / "logs" / "errors.csv"
     if summary.get("errors", 0) and errs.exists():

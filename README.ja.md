@@ -133,6 +133,13 @@ python main.py --input "D:\photo_input" --output "D:\photo_unreflect" --recursiv
 | `--mask-composite` | off | **ラッパーのフル解像度 composite**：白飛び以外は原寸のまま保持（**高解像度の SfM/3DGS 入力に最適**） |
 | `--mask-level` | `248` | mask-composite：この輝度(0-255)より明るい画素のみ置換（高いほどタイト＝ボケにくい） |
 | `--mask-dilation` | `0` | mask-composite：置換領域を N px 膨張（小さく保つ。大きいと主役がボケる） |
+| `--realityscan` | off | **RealityScan 用アライメントマスクを出力**：各*元画像*のコピー＋`‹名前›.mask.png` 除外マスク（黒＝モデルが除去した反射＝除外、白＝採用）を `realityscan/` に。→ [RealityScan マスク](#7b-realityscan-用アライメントマスク) |
+| `--rs-gate` | `250` | RealityScan マスク：*元画像*の輝度が この値以上 の画素のみ対象（0-255、0 で無効）。既定はタイトで、空・白い塗装/車体など拡散面の明るさを除外しない。グレアが強い素材は ~240 に下げる |
+| `--rs-drop` | `12` | RealityScan マスク：反射とみなす最小の輝度低下量（モデルが暗くした量） |
+| `--rs-dilation` | `2` | RealityScan マスク：除外領域を N px 膨張（反射のにじみを覆う。小さく保つ） |
+| `--rs-open` | `1` | RealityScan マスク：この半径より小さい孤立点を除去（モルフォロジー open） |
+| `--rs-masks-only` | off | RealityScan：`.mask.png` のみ出力（元画像をコピーしない）。このフォルダは**そのままでは取り込み不可**——各マスクを写真と同じフォルダに統合してから取り込むこと |
+| `--rs-separator` | `.` | RealityScan マスク名の `mask` 直前の区切り（`. _ @ # !` のいずれか） |
 | `--exiftool` | off | exiftool があれば全メタデータを複写（メーカーノート/GPS/XMP・全形式・低速） |
 | `--verbose` | off | エンジン自身の出力を表示 |
 | `--overwrite` | off | 既存出力を上書き（既定はスキップ） |
@@ -159,6 +166,7 @@ python main.py --input "D:\photo_input" --output "D:\photo_unreflect" --recursiv
 ├── preview_compare/                      # [Original | UnReflect | (Diff)] 横並び  (--make-preview)
 ├── heatmap/                              # 輝度差ヒートマップ                       (--heatmap)
 ├── masks/                                # 変更領域マスク                          (--emit-mask)
+├── realityscan/                          # 元画像コピー＋‹名前›.mask.png            (--realityscan)
 └── logs/
     ├── process_log.jsonl                 # 画像ごとの詳細 JSON（1 行 1 件）
     ├── process_log.csv                   # フラットな集計表
@@ -174,8 +182,59 @@ python main.py --input "D:\photo_input" --output "D:\photo_unreflect" --recursiv
 - **平均輝度差**（前→後）
 - **ハイライト画素率**（前/後）— 白飛び除去の度合いの指標
 - **差分ヒートマップ**（`--heatmap`）— どこをどれだけ変えたか
-- **変更マスク**（`--emit-mask`）— COLMAP の特徴**除外マスク**として渡せる（補完画素を幾何に使うより安全）
+- **変更マスク**（`--emit-mask`）— *変更された*領域の二値マスク（255=変更箇所）。モデルが触れた箇所の簡易可視化。実際の特徴**除外マスク**（黒=除外）は [`--realityscan`](#7b-realityscan-用アライメントマスク) か `tools/make_colmap_masks.py` を使用（正しい極性・命名で出力）
 - **テストモード**（`--limit N`）・**簡易モード**（`--max-size PX`）
+
+---
+
+## 7b. RealityScan 用アライメントマスク
+
+反射を写真から*消す*代わりに、元画像はそのままにして、反射画素を特徴抽出から除外する**マスク**を
+**RealityScan** に渡せます。アライメントではこちらが有利なことが多く、周囲の画素は記述子・幾何を
+保ったまま、視点依存で不安定な反射だけを無視できます（→ [§9b](#9b-ab-評価パイプライン任意)）。
+
+GUI（サイドバー → **RealityScan alignment masks**）または `--realityscan` で有効化：
+
+```powershell
+python main.py --input "D:\photo_input" --output "D:\photo_unreflect" --recursive --realityscan
+```
+
+`‹output›\realityscan\` に**そのまま取り込めるフォルダ**を出力します。各写真について、**元画像**の
+バイト完全コピーとマスクが並びます：
+
+```
+realityscan\
+├── IMG_1234.jpg                # 元画像のコピー（無改変。入力フォルダは不可侵）
+└── IMG_1234.jpg.mask.png       # 8bit グレースケール。黒＝反射(除外)、白＝採用
+```
+
+マスクは**モデルが白飛びハイライトを除去した箇所**を示します（モデルが暗くした画素を、既定では
+ほぼ白飛びの輝度でゲートするため、空・白い塗装・淡色の車体などの明るい*拡散*面は**除外されません**）。
+出力は厳密な二値（0/255・ハードエッジ）で、写真の原寸です。
+
+**RealityScan での読み込み**（RealityScan 2.x で確認。RealityCapture から不変 —
+[公式ドキュメント](https://rshelp.capturingreality.com/en-US/tools/mask.htm)）：
+
+1. **WORKFLOW → Inputs → Folder** で `‹output›\realityscan` を指定し、写真と**マスクを同時に**読み込む
+   （名前で `.mask` レイヤーが自動付与。別々に取り込むとマスクが追加写真として扱われる）。
+2. 画像を選択 → **Selected Input → Image Layers** → **「Enable masks for alignment」**にチェック
+   （ステージ別の独立トグル。メッシュ/テクスチャ有効化では自動では入らない）。
+3. アライメントを実行。
+
+> 間違えやすいのが極性です。RealityScan は **白＝採用・黒＝除外**（*"In a mask, white areas will be used
+> in processing, while black areas are excluded."*）。本ツールはこの極性で出力します（取り込み時の反転
+> トグルはありません）。
+
+調整：特徴を多く残すなら `--rs-gate` を上げる（例 `252`）、グレアが強い素材で反射を多く拾うなら下げる
+（例 `240`）。`--rs-dilation` でにじみを覆えます。実行時に**平均除外率**を表示します。大きい（>~12%）
+場合は拡散面を除外し過ぎており、その素材はマスク無しの**元画像**が最良の可能性が高いです。
+
+**GPU/重みが無い場合：** `tools/make_realityscan_masks.py` が同じ取り込み用フォルダを、純粋な輝度しきい値
+（モデル不要）で生成します：
+
+```powershell
+python tools\make_realityscan_masks.py -i "D:\photo_input" -o "D:\rs_project" --level 250 --dilation 2
+```
 
 ---
 
@@ -193,7 +252,7 @@ python main.py --input "D:\photo_input" --output "D:\photo_unreflect" --recursiv
    AI 除去は**撮り直せない素材の救済**に使う。
 2. `--make-preview --heatmap` で実行し、**プレビューを目視**：ハイライトを綺麗に除去できているか、
    テクスチャを捏造していないか。視点ごとに異なる捏造は SfM を悪化させる。
-3. **`--composite`**（ハイライト領域のみ変更）や **`--emit-mask`**（COLMAP 除外マスク）を検討。
+3. **`--mask-composite`**（ハイライト領域のみ変更）や、アライメントにはより有効な**除外マスク**（RealityScan は `--realityscan`、COLMAP は `tools/make_colmap_masks.py`）を検討（画像を改変せず反射画素のみ無視）。
 4. **A/B 比較**：元画像とクリーン化の両方で再構成し、登録率・アーティファクトの良い方を採用。3DGS の
    一部手法は反射を**除去せずモデル化**する点にも留意。
 
@@ -268,13 +327,16 @@ unreflectanything-batch/
 ├── scripts/setup_env.ps1   # 環境インストーラ（venv + cu128 torch + 依存 + 重み）
 ├── src/
 │   ├── image_io.py         # 探索 + EXIF/形式保持 I/O
-│   ├── metrics.py          # 輝度/ハイライト指標・ヒートマップ・変更マスク・full-res composite
+│   ├── metrics.py          # 輝度/ハイライト指標・ヒートマップ・変更/除外マスク・full-res composite
 │   ├── preview.py          # before/after 比較生成
+│   ├── realityscan.py      # RealityScan マスクの命名/極性/PNG 書き出しヘルパ
 │   ├── logger.py           # JSONL / CSV / errors / summary
 │   └── unreflect_batch.py  # エンジン（device 選択・モデル読込・1枚処理）
 ├── tools/
 │   ├── ab_colmap.py        # COLMAP スパース再構成 A/B
-│   └── ab_3dgs.py          # 3DGS A/B（COLMAP→LichtFeld→比較図）
+│   ├── ab_3dgs.py          # 3DGS A/B（COLMAP→LichtFeld→比較図）
+│   ├── make_colmap_masks.py       # 輝度ゲートの COLMAP 除外マスク（モデル不要）
+│   └── make_realityscan_masks.py  # 輝度ゲートの RealityScan 取り込みフォルダ（モデル不要）
 ├── examples/               # 合成デモ（make_demo.py で再現）
 └── tests/                  # 高速ユニットテスト（torch 不要）
 ```

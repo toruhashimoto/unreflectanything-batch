@@ -56,7 +56,23 @@ def build_parser() -> argparse.ArgumentParser:
     # Output artifacts / evaluation.
     p.add_argument("--make-preview", action="store_true", help="save side-by-side before/after into preview_compare/")
     p.add_argument("--heatmap", action="store_true", help="save per-image luma-difference heatmaps into heatmap/")
-    p.add_argument("--emit-mask", action="store_true", help="save approximate changed-region masks into masks/ (COLMAP exclusion masks)")
+    p.add_argument("--emit-mask", action="store_true", help="save approximate changed-region masks into masks/ (255=changed; visualization)")
+
+    # RealityScan alignment masks.
+    p.add_argument("--realityscan", action="store_true",
+                   help="emit a RealityScan-ready folder under realityscan/: a copy of each ORIGINAL image plus a '<name>.mask.png' exclusion mask (black=removed reflection=excluded, white=kept). Import the folder into RealityScan and enable 'masks for alignment'.")
+    p.add_argument("--rs-masks-only", action="store_true",
+                   help="RealityScan: write only the .mask.png files (don't copy the originals). NOTE: the folder is then NOT directly importable — each .mask.png must be merged into the same folder as its image before import")
+    p.add_argument("--rs-drop", type=float, default=12.0,
+                   help="RealityScan mask: min luma the model must darken a pixel by to count it as a removed reflection")
+    p.add_argument("--rs-gate", type=float, default=250.0,
+                   help="RealityScan mask: only mask pixels whose ORIGINAL luma was >= this (0-255; 0 disables). Tight by default so diffuse-bright surfaces (sky, white paint/bodywork) are NOT excluded; lower to ~240 for a genuinely glary set")
+    p.add_argument("--rs-dilation", type=int, default=2,
+                   help="RealityScan mask: grow the excluded region by N px to cover reflection halos (keep small)")
+    p.add_argument("--rs-open", type=int, default=1,
+                   help="RealityScan mask: remove specks smaller than this radius (morphological open)")
+    p.add_argument("--rs-separator", default=".", choices=[".", "_", "@", "#", "!"],
+                   help="RealityScan mask name separator before 'mask' (e.g. '.' -> name.ext.mask.png)")
 
     # Safety / behaviour.
     p.add_argument("--overwrite", action="store_true", help="overwrite existing outputs (default: skip)")
@@ -114,6 +130,13 @@ def main(argv: list[str] | None = None) -> int:
         mask_composite_level=args.mask_level,
         mask_composite_dilation=args.mask_dilation,
         mask_composite_feather=args.mask_feather,
+        realityscan=args.realityscan,
+        rs_copy_originals=not args.rs_masks_only,
+        rs_separator=args.rs_separator,
+        rs_drop_level=args.rs_drop,
+        rs_highlight_gate=args.rs_gate,
+        rs_dilation=args.rs_dilation,
+        rs_open=args.rs_open,
         use_exiftool=args.exiftool,
         verbose=args.verbose,
         dry_run=args.dry_run,
@@ -151,6 +174,26 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  errors      : {summary.get('errors', 0)}")
     print(f"  output      : {summary.get('output_dir')}")
     print(f"  logs        : {Path(summary.get('output_dir', '.')) / 'logs'}")
+    if cfg.realityscan:
+        rs_dir = Path(summary.get('output_dir', '.')) / 'realityscan'
+        mean_excl = summary.get('realityscan_mean_excluded_pct')
+        n_masks = summary.get('realityscan_masks_written', 0)
+        if not n_masks:
+            print("  RealityScan : [!] no masks generated "
+                  f"({summary.get('realityscan_warning', '')})")
+        else:
+            print(f"  RealityScan : {rs_dir}  ({n_masks} masks, avg {mean_excl:.2f}% excluded)")
+            if cfg.rs_copy_originals:
+                print("     -> import this folder into RealityScan (photos + masks together),")
+                print("        then enable 'masks for alignment' in Selected Input > Image Layers.")
+            else:
+                print("     -> masks-only: place each .mask.png next to its image (same folder),")
+                print("        import together, then enable 'masks for alignment'.")
+            if mean_excl is not None and mean_excl > 12:
+                print(f"     [!] excluding {mean_excl:.1f}% of pixels on average -- likely over-masking "
+                      "diffuse-bright areas, not just reflections.")
+                print("         Raise --rs-gate (e.g. 252), or this set may simply not need masking "
+                      "(originals often reconstruct best for mild glare).")
     if summary.get("errors", 0):
         print(f"  -> see {Path(summary.get('output_dir', '.')) / 'logs' / 'errors.csv'}")
     return 0

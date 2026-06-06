@@ -155,10 +155,69 @@ def change_mask(
     """Binary (H, W) uint8 mask (0/255) of regions the network changed.
 
     This approximates the "removed-reflection" region from the before/after diff.
-    It is useful as a COLMAP feature-exclusion mask: excluding hallucinated-fill
-    regions from SfM matching is safer than trusting invented pixels.
+    255 = changed (where the network altered the image), 0 = unchanged. Note the
+    polarity is the *opposite* of a COLMAP/RealityScan exclusion mask — for that,
+    use :func:`reflection_exclusion_mask`, which marks reflections black (excluded).
     """
     before = np.asarray(before)
     after = np.asarray(after)
     diff = np.abs(to_luma(before) - to_luma(after))
     return np.where(diff >= level, np.uint8(255), np.uint8(0))
+
+
+def reflection_exclusion_mask(
+    before: np.ndarray,
+    after: np.ndarray,
+    drop_level: float = 12.0,
+    highlight_gate: float = 250.0,
+    dilation: int = 2,
+    open_radius: int = 1,
+) -> np.ndarray:
+    """Binary (H, W) uint8 *exclusion* mask from a model before/after pair, in the
+    polarity RealityScan / COLMAP expect: ``0`` (black) = **exclude** (a reflection
+    the model removed), ``255`` (white) = **keep**.
+
+    A pixel is treated as a removed specular reflection when the model *darkened* it
+    by at least ``drop_level`` luma **and** (if ``highlight_gate`` > 0) the original
+    pixel was at least that bright. The default gate is deliberately TIGHT (250 ≈
+    near-blown) because luma alone cannot distinguish a blown specular from a bright
+    *diffuse* surface (overcast sky, white paint, a light-coloured car body); a low gate
+    masks all of them and fragments the SfM reconstruction. Lower the gate (e.g. 240) to
+    catch more reflection on a genuinely glary set, raise it (e.g. 252) to preserve more
+    features. If the excluded fraction is large, the set probably does not need masking
+    at all (originals reconstruct best for mild glare).
+
+    The output is **strictly binary with hard edges**: RealityScan accepts up to 256
+    gray shades but officially discourages them ("may interfere with processing and
+    produce inconsistent results"), so no feather is applied. ``open_radius`` removes
+    tiny specks (morphological open) and ``dilation`` grows the excluded region to
+    cover reflection halos — keep both small (large values fragment SfM).
+    """
+    before = np.asarray(before)
+    after = np.asarray(after)
+    if before.shape != after.shape:
+        h = min(before.shape[0], after.shape[0])
+        w = min(before.shape[1], after.shape[1])
+        before = before[:h, :w]
+        after = after[:h, :w]
+
+    lb = to_luma(before)
+    la = to_luma(after)
+    refl = (lb - la) >= drop_level  # model darkened it -> probable removed highlight
+    if highlight_gate and highlight_gate > 0:
+        refl &= lb >= highlight_gate
+    refl = refl.astype(np.uint8)
+
+    try:
+        import cv2
+
+        if open_radius and open_radius > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * open_radius + 1,) * 2)
+            refl = cv2.morphologyEx(refl, cv2.MORPH_OPEN, k)
+        if dilation and dilation > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilation + 1,) * 2)
+            refl = cv2.dilate(refl, k)
+    except Exception:  # noqa: BLE001 - morphology is best-effort; binary result still valid
+        pass
+
+    return np.where(refl > 0, np.uint8(0), np.uint8(255))  # reflection -> black (excluded)

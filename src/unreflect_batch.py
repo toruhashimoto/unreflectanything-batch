@@ -30,6 +30,7 @@ from PIL import Image
 from . import image_io
 from . import metrics as metrics_mod
 from . import preview as preview_mod
+from . import realityscan as realityscan_mod
 from .logger import RunLogger, PROCESSED_BY
 
 MODEL_NAME = "UnReflectAnything"
@@ -114,6 +115,16 @@ class BatchConfig:
     mask_composite_level: float = 248.0
     mask_composite_dilation: int = 0
     mask_composite_feather: float = 1.0
+    # RealityScan alignment masks: emit a ready-to-import folder with a copy of each
+    # ORIGINAL image plus a "<name>.mask.png" exclusion mask (black = reflection the
+    # model removed = excluded from feature detection; white = kept). See src/realityscan.py.
+    realityscan: bool = False
+    rs_copy_originals: bool = True   # copy originals next to masks (import them together)
+    rs_separator: str = "."          # mask name separator: one of . _ @ # !
+    rs_drop_level: float = 12.0      # min luma the model must darken a pixel by to mask it
+    rs_highlight_gate: float = 250.0 # only mask pixels whose original luma was >= this (0 = off; tight by default so diffuse-bright surfaces aren't excluded)
+    rs_dilation: int = 2             # grow the excluded region by N px (cover halos; keep small)
+    rs_open: int = 1                 # remove specks smaller than this radius (morphological open)
     use_exiftool: bool = False  # full metadata copy via exiftool (if available)
     verbose: bool = False  # let the engine's own stdout through
     highlight_level: float = metrics_mod.DEFAULT_HIGHLIGHT_LEVEL
@@ -135,6 +146,12 @@ class BatchConfig:
             "mask_composite_level": self.mask_composite_level,
             "mask_composite_dilation": self.mask_composite_dilation,
             "mask_composite_feather": self.mask_composite_feather,
+            "realityscan": self.realityscan,
+            "rs_copy_originals": self.rs_copy_originals,
+            "rs_drop_level": self.rs_drop_level,
+            "rs_highlight_gate": self.rs_highlight_gate,
+            "rs_dilation": self.rs_dilation,
+            "rs_open": self.rs_open,
             "max_size": self.max_size,
             "use_exiftool": self.use_exiftool,
         }
@@ -244,6 +261,10 @@ def process_one(
     t0 = time.perf_counter()
     dst = image_io.relative_output_path(src, cfg.input_dir, cfg.output_dir)
     rel = src.relative_to(cfg.input_dir)
+    rs_mask_dst = (
+        subdirs["realityscan"] / rel.parent / realityscan_mod.mask_filename(src.name, cfg.rs_separator)
+        if cfg.realityscan else None
+    )
     record: dict = {
         "status": "ok",
         "processed_by": PROCESSED_BY,
@@ -259,8 +280,14 @@ def process_one(
         meta = image_io.read_metadata(src)
         record["input_size"] = list(meta["size"])  # (w, h)
 
-        # No-overwrite default.
-        if dst.exists() and not cfg.overwrite:
+        # No-overwrite default. The cleaned image is the primary output, but a
+        # RealityScan mask is a separately-requested deliverable: if it's still missing
+        # we must run (inference is required to build it) even when the cleaned image
+        # already exists — otherwise re-running with --realityscan would silently
+        # produce nothing. We just keep the existing cleaned image in that case.
+        cleaned_exists = dst.exists()
+        rs_pending = rs_mask_dst is not None and not rs_mask_dst.exists()
+        if cleaned_exists and not cfg.overwrite and not rs_pending:
             record["status"] = "skipped"
             record["error"] = "output exists (use --overwrite to replace)"
             record["duration_sec"] = round(time.perf_counter() - t0, 4)
@@ -308,9 +335,13 @@ def process_one(
         )
 
         # Save the cleaned image (format/EXIF/ICC preserved from the original src).
-        image_io.save_processed(
-            src, after_pil, dst, jpeg_quality=cfg.jpeg_quality, use_exiftool=cfg.use_exiftool
-        )
+        # If it already exists and we only ran to (re)build a RealityScan mask, keep it.
+        if cleaned_exists and not cfg.overwrite:
+            record["note"] = "cleaned output already existed and was kept; ran for RealityScan mask only"
+        else:
+            image_io.save_processed(
+                src, after_pil, dst, jpeg_quality=cfg.jpeg_quality, use_exiftool=cfg.use_exiftool
+            )
 
         # Optional artifacts.
         if cfg.heatmap or cfg.make_preview:
@@ -336,6 +367,28 @@ def process_one(
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(mask_arr, "L").save(mask_path, format="PNG")
             record["mask"] = str(mask_path)
+
+        # RealityScan alignment package: a copy of the ORIGINAL image + a
+        # "<name>.mask.png" exclusion mask (black = removed reflection, white = kept),
+        # side by side so RealityScan auto-attaches the mask layer on import.
+        if cfg.realityscan:
+            ow, oh = meta["size"]  # native original (w, h)
+            rs_mask = metrics_mod.reflection_exclusion_mask(
+                before_arr, after_arr,
+                drop_level=cfg.rs_drop_level,
+                highlight_gate=cfg.rs_highlight_gate,
+                dilation=cfg.rs_dilation,
+                open_radius=cfg.rs_open,
+            )
+            # The mask is computed at the processed resolution; force it 1:1 with the
+            # native original (matters only in --max-size quick mode).
+            realityscan_mod.save_mask_png(rs_mask, rs_mask_dst, like_size=(ow, oh))
+            record["realityscan_mask"] = str(rs_mask_dst)
+            record["realityscan_excluded_pct"] = round(float((rs_mask == 0).mean()) * 100.0, 3)
+            if cfg.rs_copy_originals:
+                img_dst = subdirs["realityscan"] / rel
+                realityscan_mod.copy_source_image(src, img_dst)
+                record["realityscan_image"] = str(img_dst)
 
         record["duration_sec"] = round(time.perf_counter() - t0, 4)
         return record
@@ -394,6 +447,7 @@ def run_batch(
         "preview": cfg.output_dir / "preview_compare",
         "heatmap": cfg.output_dir / "heatmap",
         "masks": cfg.output_dir / "masks",
+        "realityscan": cfg.output_dir / "realityscan",
         "logs": cfg.output_dir / "logs",
     }
     logger = RunLogger(subdirs["logs"])
@@ -440,10 +494,13 @@ def run_batch(
         except Exception:  # noqa: BLE001
             bar = None
 
+    rs_excluded: list[float] = []
     try:
         for i, src in iterator:
             rec = process_one(src, cfg, model, device, tmp_dir, subdirs)
             logger.log(rec)
+            if "realityscan_excluded_pct" in rec:
+                rs_excluded.append(rec["realityscan_excluded_pct"])
             if bar is not None:
                 bar.update(1)
                 bar.set_postfix_str(rec["status"])
@@ -455,6 +512,17 @@ def run_batch(
         _rmtree_quiet(tmp_dir)
 
     summary.update(logger_counts(logger))
+    if cfg.realityscan:
+        summary["realityscan_dir"] = str(subdirs["realityscan"])
+        if rs_excluded:
+            summary["realityscan_mean_excluded_pct"] = round(sum(rs_excluded) / len(rs_excluded), 3)
+            summary["realityscan_masks_written"] = len(rs_excluded)
+        else:
+            summary["realityscan_masks_written"] = 0
+            summary["realityscan_warning"] = (
+                "no RealityScan masks were generated (all images skipped - their masks "
+                "already existed or there were no images). Pass --overwrite to regenerate."
+            )
     logger.finalize(summary)
     return summary
 
