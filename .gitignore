@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual env
+.venv/
+venv/
+
+# Local verification scratch (not part of the deliverable)
+.verify/
+.tools/
+ab_demo/
+
+# Tool outputs / data (never commit photos or generated results)
+output/
+*.log
+
+# Editor / agent local config (contains machine-specific absolute paths)
+.claude/
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store

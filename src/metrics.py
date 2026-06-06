@@ -1,0 +1,158 @@
+"""Evaluation metrics for reflection-removal quality.
+
+These are *evaluation-only* signals to help judge whether a cleaned set is likely
+to help (or hurt) a downstream 3DGS / SfM reconstruction — NOT ground-truth
+measurements. All functions operate on uint8 RGB numpy arrays of shape (H, W, 3).
+"""
+from __future__ import annotations
+
+import numpy as np
+
+# Rec.601 luma weights.
+_LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+
+# A pixel whose luma is at/above this (0-255) is treated as a probable specular
+# highlight / blown-out region. 235 ~= 0.92 of full scale.
+DEFAULT_HIGHLIGHT_LEVEL = 235.0
+
+
+def to_luma(rgb: np.ndarray) -> np.ndarray:
+    """Return an (H, W) float32 luma image in [0, 255]."""
+    arr = np.asarray(rgb, dtype=np.float32)
+    if arr.ndim == 2:
+        return arr
+    return arr[..., :3] @ _LUMA
+
+
+def mean_luminance(rgb: np.ndarray) -> float:
+    return float(to_luma(rgb).mean())
+
+
+def highlight_ratio(rgb: np.ndarray, level: float = DEFAULT_HIGHLIGHT_LEVEL) -> float:
+    """Fraction of pixels at/above ``level`` luma — a proxy for highlight area."""
+    luma = to_luma(rgb)
+    if luma.size == 0:
+        return 0.0
+    return float((luma >= level).mean())
+
+
+def compute_pair_metrics(
+    before: np.ndarray,
+    after: np.ndarray,
+    highlight_level: float = DEFAULT_HIGHLIGHT_LEVEL,
+) -> dict:
+    """Before/after evaluation metrics.
+
+    ``after`` is resized-back to original dims by the engine, so shapes match; if
+    not, the after image is centre-aligned by truncation to be safe.
+    """
+    before = np.asarray(before)
+    after = np.asarray(after)
+    if before.shape != after.shape:
+        h = min(before.shape[0], after.shape[0])
+        w = min(before.shape[1], after.shape[1])
+        before = before[:h, :w]
+        after = after[:h, :w]
+
+    lb = mean_luminance(before)
+    la = mean_luminance(after)
+    hb = highlight_ratio(before, highlight_level)
+    ha = highlight_ratio(after, highlight_level)
+    mad = float(np.abs(before.astype(np.float32) - after.astype(np.float32)).mean())
+    return {
+        "mean_luma_before": round(lb, 4),
+        "mean_luma_after": round(la, 4),
+        "mean_luma_delta": round(la - lb, 4),
+        "highlight_ratio_before": round(hb, 6),
+        "highlight_ratio_after": round(ha, 6),
+        "highlight_ratio_delta": round(ha - hb, 6),
+        "mean_abs_diff": round(mad, 4),
+    }
+
+
+def diff_heatmap(before: np.ndarray, after: np.ndarray) -> np.ndarray:
+    """Return an (H, W, 3) uint8 RGB heatmap of the per-pixel luma difference.
+
+    Uses OpenCV's TURBO colormap when available, else a numpy fallback. Bright =
+    large change (region the network altered).
+    """
+    before = np.asarray(before)
+    after = np.asarray(after)
+    if before.shape != after.shape:
+        h = min(before.shape[0], after.shape[0])
+        w = min(before.shape[1], after.shape[1])
+        before = before[:h, :w]
+        after = after[:h, :w]
+
+    diff = np.abs(to_luma(before) - to_luma(after))
+    dmax = float(diff.max())
+    norm = (diff / dmax) if dmax > 1e-6 else np.zeros_like(diff)
+    gray = (norm * 255.0).astype(np.uint8)
+
+    try:
+        import cv2
+
+        bgr = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
+        return bgr[..., ::-1].copy()  # BGR -> RGB
+    except Exception:  # noqa: BLE001 - numpy fallback colormap
+        t = norm
+        r = np.clip(1.5 - np.abs(4 * t - 3), 0, 1)
+        g = np.clip(1.5 - np.abs(4 * t - 2), 0, 1)
+        b = np.clip(1.5 - np.abs(4 * t - 1), 0, 1)
+        return (np.stack([r, g, b], axis=-1) * 255.0).astype(np.uint8)
+
+
+def luminance_composite(
+    original: np.ndarray,
+    diffuse: np.ndarray,
+    level: float = DEFAULT_HIGHLIGHT_LEVEL,
+    dilation: int = 8,
+    feather: float = 4.0,
+) -> np.ndarray:
+    """Full-resolution, highlight-gated composite.
+
+    Keeps the *original* pixels everywhere except where the original is a bright
+    highlight (luma >= ``level``), and only there blends in the model's diffuse
+    result. This preserves full-resolution detail (important for SfM/3DGS) while
+    still suppressing blown highlights — a workaround for the model's ~448 px
+    internal resolution softening high-res inputs. Returns (H, W, 3) uint8.
+    """
+    orig = np.asarray(original, dtype=np.float32)
+    diff = np.asarray(diffuse, dtype=np.float32)
+    if orig.shape != diff.shape:
+        h = min(orig.shape[0], diff.shape[0])
+        w = min(orig.shape[1], diff.shape[1])
+        orig, diff = orig[:h, :w], diff[:h, :w]
+
+    m = (to_luma(orig) >= level).astype(np.float32)
+    try:
+        import cv2
+
+        if dilation and dilation > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilation + 1, 2 * dilation + 1))
+            m = cv2.dilate(m, k)
+        if feather and feather > 0:
+            m = cv2.GaussianBlur(m, (0, 0), float(feather))
+    except Exception:  # noqa: BLE001 - mask refinement is best-effort
+        pass
+
+    m3 = np.clip(m, 0.0, 1.0)[..., None]
+    out = orig * (1.0 - m3) + diff * m3
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def change_mask(
+    before: np.ndarray,
+    after: np.ndarray,
+    level: float = 12.0,
+) -> np.ndarray:
+    """Binary (H, W) uint8 mask (0/255) of regions the network changed.
+
+    This approximates the "removed-reflection" region from the before/after diff.
+    It is useful as a COLMAP feature-exclusion mask: excluding hallucinated-fill
+    regions from SfM matching is safer than trusting invented pixels.
+    """
+    before = np.asarray(before)
+    after = np.asarray(after)
+    diff = np.abs(to_luma(before) - to_luma(after))
+    return np.where(diff >= level, np.uint8(255), np.uint8(0))

@@ -1,0 +1,50 @@
+# =============================================================================
+# UnReflect Batch — Python dependencies
+# =============================================================================
+# INSTALL ORDER MATTERS. See README "2. Setup" or just run scripts/setup_env.ps1,
+# which performs all of this automatically. Two Windows-specific gotchas are
+# baked in below:
+#
+# (1) PyTorch must be installed FIRST from the CUDA index — the default PyPI
+#     `torch` wheel on Windows is CPU-ONLY, and an RTX 50-series (Blackwell,
+#     sm_120) GPU needs the cu128 build:
+#
+#       pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu128
+#       pip install -r requirements.txt
+#
+#     `==2.9.1` matches the installed `2.9.1+cu128`, so the line below does not
+#     clobber the CUDA wheels. Verified: torch.cuda.get_arch_list() contains
+#     'sm_120' and a cuda matmul runs on the RTX 5070 Ti.
+#
+# (2) `transformers` MUST be pinned to the exact commit unreflectanything was
+#     built against. The PyPI package leaves `transformers` UNPINNED, so a plain
+#     install pulls the latest transformers whose DINOv3 module keys differ from
+#     the checkpoint, and inference dies with:
+#       RuntimeError: Error(s) in loading state_dict ... Missing key(s) ... dinov3
+#     The git-archive pin below avoids that (no local `git` needed — pip fetches
+#     the zip). This is the single most important line in this file.
+# -----------------------------------------------------------------------------
+
+# Core engine
+unreflectanything==1.1.1
+
+# Pinned transformers commit (pyproject rev 2fe43376...) — REQUIRED for the
+# pretrained checkpoint to load. Listing it explicitly (with a direct URL) makes
+# pip honor this commit instead of unreflectanything's unpinned `transformers`.
+transformers @ https://github.com/huggingface/transformers/archive/2fe43376cdde02b7ffcf117e6eb9aa4375fb2dd1.zip
+
+# Faithful EXIF transplant for JPEG->JPEG (keeps FocalLengthIn35mmFilm etc.).
+piexif==1.1.3
+
+# Progress bars (also a transitive dep of unreflectanything; listed for clarity).
+tqdm>=4.66
+
+# torch / torchvision        -> installed separately from the cu128 index (see above)
+# pillow / numpy / opencv     -> pulled transitively from unreflectanything (exact pins)
+# huggingface-hub             -> pulled transitively from transformers (used by
+#                                `unreflectanything download --weights`)
+
+# --- GUI (Phase 2; optional) -------------------------------------------------
+# Installed by run_app.bat / scripts/setup_env.ps1. Kept optional so the headless
+# CLI keeps the smallest dependency surface.
+# streamlit>=1.40
