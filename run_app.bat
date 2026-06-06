@@ -1,6 +1,6 @@
 @echo off
 REM ===========================================================================
-REM  UnReflect Batch — launch the Streamlit GUI.
+REM  UnReflect Batch - launch the Streamlit GUI.
 REM  Double-click to start. On first run it sets up the environment and
 REM  downloads the model weights (~5.9 GB); later runs start immediately.
 REM ===========================================================================
@@ -21,6 +21,6 @@ if errorlevel 1 (
   "%ROOT%.venv\Scripts\python.exe" -m pip install "streamlit>=1.40"
 )
 
-echo [*] Starting UnReflect Batch GUI — your browser will open shortly.
+echo [*] Starting UnReflect Batch GUI - your browser will open shortly.
 "%ROOT%.venv\Scripts\python.exe" -m streamlit run "%ROOT%app.py"
 pause

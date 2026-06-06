@@ -1,6 +1,6 @@
 @echo off
 REM ===========================================================================
-REM  UnReflect Batch — example CLI batch run.
+REM  UnReflect Batch - example CLI batch run.
 REM  Edit INPUT and OUTPUT below, then double-click this file.
 REM  OUTPUT must be a SEPARATE folder (never inside INPUT). Originals are kept.
 REM ===========================================================================

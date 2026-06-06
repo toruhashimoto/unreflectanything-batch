@@ -93,7 +93,7 @@ if ($Gui) {
 
 # --- 4. Pretrained weights (~5.9 GB) ---------------------------------------
 if (-not $SkipWeights) {
-    Write-Step "Downloading pretrained weights (~5.9 GB) — one time"
+    Write-Step "Downloading pretrained weights (~5.9 GB) - one time"
     $ura = Join-Path $Root ".venv\Scripts\unreflectanything.exe"
     & $ura download --weights
     Write-Step "Verifying weights load"
