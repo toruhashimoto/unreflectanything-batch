@@ -332,4 +332,6 @@ as installed dependencies or external tools. Respect each project's license:
 - [PyTorch](https://pytorch.org), [Pillow](https://python-pillow.org),
   [piexif](https://github.com/hMatoba/Piexif), [Streamlit](https://streamlit.io).
 
-See `LICENSE` for this project's own license.
+This project is licensed under the **MIT License** (see [`LICENSE`](LICENSE)); see
+[`NOTICE.md`](NOTICE.md) for the full third-party tool/model terms (incl. DINOv3 and
+LichtFeld's GPL-3.0).
