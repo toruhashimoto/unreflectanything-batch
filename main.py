@@ -90,6 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="RealityScan mask: remove specks smaller than this radius (morphological open)")
     p.add_argument("--rs-separator", default=".", choices=[".", "_", "@", "#", "!"],
                    help="RealityScan mask name separator before 'mask' (e.g. '.' -> name.ext.mask.png)")
+    p.add_argument("--mask-warn", type=float, default=5.0,
+                   help="warn when the average %% of pixels excluded by the masks exceeds this")
+    p.add_argument("--mask-danger", type=float, default=12.0,
+                   help="flag DANGER (likely over-masking valid features) when the average %% excluded exceeds this")
 
     # Safety / behaviour.
     p.add_argument("--overwrite", action="store_true", help="overwrite existing outputs (default: skip)")
@@ -164,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
         rs_highlight_gate=args.rs_gate,
         rs_dilation=args.rs_dilation,
         rs_open=args.rs_open,
+        mask_warn_pct=args.mask_warn,
+        mask_danger_pct=args.mask_danger,
         use_exiftool=args.exiftool,
         verbose=args.verbose,
         dry_run=args.dry_run,
@@ -211,13 +217,18 @@ def main(argv: list[str] | None = None) -> int:
                   f"({summary.get('realityscan_warning', '')})")
         else:
             print(f"  RealityScan : {rs_dir}  ({n_masks} masks, avg {mean_excl:.2f}% excluded)")
+            warn_n = summary.get('realityscan_warn_images', 0)
+            danger_n = summary.get('realityscan_danger_images', 0)
+            if warn_n or danger_n:
+                print(f"     mask-area  : {warn_n} warning (> {cfg.mask_warn_pct:.0f}%), "
+                      f"{danger_n} danger (> {cfg.mask_danger_pct:.0f}%) of {n_masks} images")
             if cfg.rs_copy_originals:
                 print("     -> import this folder into RealityScan (photos + masks together),")
                 print("        then enable 'masks for alignment' in Selected Input > Image Layers.")
             else:
                 print("     -> masks-only: place each .mask.png next to its image (same folder),")
                 print("        import together, then enable 'masks for alignment'.")
-            if mean_excl is not None and mean_excl > 12:
+            if mean_excl is not None and mean_excl > cfg.mask_danger_pct:
                 print(f"     [!] excluding {mean_excl:.1f}% of pixels on average -- likely over-masking "
                       "diffuse-bright areas, not just reflections.")
                 print("         Raise --rs-gate (e.g. 252), or this set may simply not need masking "

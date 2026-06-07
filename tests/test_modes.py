@@ -95,3 +95,14 @@ def test_pending_outputs_never_empty():
 ])
 def test_mask_ratio_warning_level(pct, level):
     assert mask_ratio_warning_level(pct) == level
+
+
+def test_mask_ratio_warning_level_custom_thresholds():
+    assert mask_ratio_warning_level(7.0, warn=10.0, danger=20.0) == "ok"
+    assert mask_ratio_warning_level(15.0, warn=10.0, danger=20.0) == "warning"
+    assert mask_ratio_warning_level(25.0, warn=10.0, danger=20.0) == "danger"
+
+
+def test_config_has_default_mask_thresholds():
+    c = _cfg()
+    assert c.mask_warn_pct == 5.0 and c.mask_danger_pct == 12.0

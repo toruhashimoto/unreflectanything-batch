@@ -108,3 +108,25 @@ def test_exclusion_mask_is_strictly_binary():
     after[4:12, 4:12] = 90
     m = metrics.reflection_exclusion_mask(before, after, highlight_gate=200)
     assert set(np.unique(m).tolist()).issubset({0, 255})
+
+
+def test_exclusion_mask_return_stats():
+    # Left half darkened (a removed highlight); no morphology -> candidate == final == 50%.
+    before = _solid(255, (10, 10))
+    after = before.copy()
+    after[:, :5] = 100
+    mask, stats = metrics.reflection_exclusion_mask(
+        before, after, drop_level=12, highlight_gate=200, dilation=0, open_radius=0,
+        return_stats=True,
+    )
+    assert set(stats) == {"candidate_pixel_ratio", "final_mask_ratio"}
+    assert abs(stats["candidate_pixel_ratio"] - 50.0) < 1e-6
+    assert abs(stats["final_mask_ratio"] - 50.0) < 1e-6
+    assert int(mask[:, :5].max()) == 0 and int(mask[:, 5:].min()) == 255
+
+
+def test_exclusion_mask_default_return_is_array_not_tuple():
+    # Back-compat: without return_stats it still returns a bare array.
+    img = _solid(255)
+    out = metrics.reflection_exclusion_mask(img, img)
+    assert isinstance(out, np.ndarray)

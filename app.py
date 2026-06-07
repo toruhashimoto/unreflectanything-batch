@@ -256,6 +256,10 @@ if run:
         mean_excl = summary.get("realityscan_mean_excluded_pct")
         if mean_excl is not None:
             st.metric("Avg pixels excluded", f"{mean_excl:.2f}%")
+            warn_n = summary.get("realityscan_warn_images", 0)
+            danger_n = summary.get("realityscan_danger_images", 0)
+            if warn_n or danger_n:
+                st.caption(f"Per-image mask-area flags: **{warn_n}** warning, **{danger_n}** danger.")
             if mean_excl > 12:
                 st.error(
                     f"⛔ Excluding {mean_excl:.1f}% of pixels on average — likely "

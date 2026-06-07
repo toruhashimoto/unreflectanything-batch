@@ -184,6 +184,11 @@ class BatchConfig:
     rs_highlight_gate: float = 250.0 # only mask pixels whose original luma was >= this (0 = off; tight by default so diffuse-bright surfaces aren't excluded)
     rs_dilation: int = 2             # grow the excluded region by N px (cover halos; keep small)
     rs_open: int = 1                 # remove specks smaller than this radius (morphological open)
+    # Mask-area-ratio warning thresholds (% of pixels excluded). Over-masking removes
+    # valid features and hurts high-detail alignment, so a large excluded area is a
+    # danger signal, not a success.
+    mask_warn_pct: float = 5.0
+    mask_danger_pct: float = 12.0
     use_exiftool: bool = False  # full metadata copy via exiftool (if available)
     verbose: bool = False  # let the engine's own stdout through
     highlight_level: float = metrics_mod.DEFAULT_HIGHLIGHT_LEVEL
@@ -216,6 +221,8 @@ class BatchConfig:
             "rs_highlight_gate": self.rs_highlight_gate,
             "rs_dilation": self.rs_dilation,
             "rs_open": self.rs_open,
+            "mask_warn_pct": self.mask_warn_pct,
+            "mask_danger_pct": self.mask_danger_pct,
             "max_size": self.max_size,
             "use_exiftool": self.use_exiftool,
         }
@@ -440,21 +447,26 @@ def process_one(
         # side by side so RealityScan auto-attaches the mask layer on import.
         if cfg.realityscan:
             ow, oh = meta["size"]  # native original (w, h)
-            rs_mask = metrics_mod.reflection_exclusion_mask(
+            rs_mask, mask_stats = metrics_mod.reflection_exclusion_mask(
                 before_arr, after_arr,
                 drop_level=cfg.rs_drop_level,
                 highlight_gate=cfg.rs_highlight_gate,
                 dilation=cfg.rs_dilation,
                 open_radius=cfg.rs_open,
+                return_stats=True,
             )
             # The mask is computed at the processed resolution; force it 1:1 with the
             # native original (matters only in --max-size quick mode).
             realityscan_mod.save_mask_png(rs_mask, rs_mask_dst, like_size=(ow, oh))
             record["realityscan_mask"] = str(rs_mask_dst)
-            excluded_pct = round(float((rs_mask == 0).mean()) * 100.0, 3)
-            record["realityscan_excluded_pct"] = excluded_pct
-            record["mask_ratio"] = excluded_pct  # alias: % of pixels excluded from alignment
-            record["mask_ratio_level"] = mask_ratio_warning_level(excluded_pct)
+            final_ratio = mask_stats["final_mask_ratio"]
+            record["candidate_pixel_ratio"] = mask_stats["candidate_pixel_ratio"]
+            record["final_mask_ratio"] = final_ratio
+            record["realityscan_excluded_pct"] = final_ratio
+            record["mask_ratio"] = final_ratio  # alias: % of pixels excluded from alignment
+            record["mask_ratio_level"] = mask_ratio_warning_level(
+                final_ratio, cfg.mask_warn_pct, cfg.mask_danger_pct
+            )
             if cfg.rs_copy_originals:
                 img_dst = subdirs["realityscan"] / rel
                 realityscan_mod.copy_source_image(src, img_dst)
@@ -589,6 +601,10 @@ def run_batch(
         if rs_excluded:
             summary["realityscan_mean_excluded_pct"] = round(sum(rs_excluded) / len(rs_excluded), 3)
             summary["realityscan_masks_written"] = len(rs_excluded)
+            summary["realityscan_warn_images"] = sum(
+                1 for p in rs_excluded if cfg.mask_warn_pct < p <= cfg.mask_danger_pct)
+            summary["realityscan_danger_images"] = sum(
+                1 for p in rs_excluded if p > cfg.mask_danger_pct)
         else:
             summary["realityscan_masks_written"] = 0
             summary["realityscan_warning"] = (

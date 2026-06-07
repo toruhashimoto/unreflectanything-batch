@@ -165,6 +165,26 @@ def change_mask(
     return np.where(diff >= level, np.uint8(255), np.uint8(0))
 
 
+def _morph_clean(refl: np.ndarray, open_radius: int, dilation: int) -> np.ndarray:
+    """Despeckle (morphological open) then grow (dilate) a 0/1 uint8 mask.
+
+    Shared by the model-based and pure-luma exclusion masks. Best-effort: if OpenCV
+    is unavailable the (still valid) un-morphed binary mask is returned.
+    """
+    try:
+        import cv2
+
+        if open_radius and open_radius > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * open_radius + 1,) * 2)
+            refl = cv2.morphologyEx(refl, cv2.MORPH_OPEN, k)
+        if dilation and dilation > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilation + 1,) * 2)
+            refl = cv2.dilate(refl, k)
+    except Exception:  # noqa: BLE001 - morphology is best-effort; binary result still valid
+        pass
+    return refl
+
+
 def reflection_exclusion_mask(
     before: np.ndarray,
     after: np.ndarray,
@@ -172,7 +192,8 @@ def reflection_exclusion_mask(
     highlight_gate: float = 250.0,
     dilation: int = 2,
     open_radius: int = 1,
-) -> np.ndarray:
+    return_stats: bool = False,
+):
     """Binary (H, W) uint8 *exclusion* mask from a model before/after pair, in the
     polarity RealityScan / COLMAP expect: ``0`` (black) = **exclude** (a reflection
     the model removed), ``255`` (white) = **keep**.
@@ -203,21 +224,16 @@ def reflection_exclusion_mask(
 
     lb = to_luma(before)
     la = to_luma(after)
-    refl = (lb - la) >= drop_level  # model darkened it -> probable removed highlight
+    refl_bool = (lb - la) >= drop_level  # model darkened it -> probable removed highlight
     if highlight_gate and highlight_gate > 0:
-        refl &= lb >= highlight_gate
-    refl = refl.astype(np.uint8)
+        refl_bool &= lb >= highlight_gate
+    candidate_ratio = float(refl_bool.mean()) * 100.0  # candidate area BEFORE morphology
 
-    try:
-        import cv2
-
-        if open_radius and open_radius > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * open_radius + 1,) * 2)
-            refl = cv2.morphologyEx(refl, cv2.MORPH_OPEN, k)
-        if dilation and dilation > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilation + 1,) * 2)
-            refl = cv2.dilate(refl, k)
-    except Exception:  # noqa: BLE001 - morphology is best-effort; binary result still valid
-        pass
-
-    return np.where(refl > 0, np.uint8(0), np.uint8(255))  # reflection -> black (excluded)
+    refl = _morph_clean(refl_bool.astype(np.uint8), open_radius, dilation)
+    mask = np.where(refl > 0, np.uint8(0), np.uint8(255))  # reflection -> black (excluded)
+    if return_stats:
+        return mask, {
+            "candidate_pixel_ratio": round(candidate_ratio, 3),
+            "final_mask_ratio": round(float((mask == 0).mean()) * 100.0, 3),
+        }
+    return mask

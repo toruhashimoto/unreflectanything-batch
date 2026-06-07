@@ -30,6 +30,8 @@ _CSV_FIELDS = [
     "model",
     "model_version",
     "device",
+    "mode",
+    "backend",
     "input_w",
     "input_h",
     "output_w",
@@ -45,6 +47,10 @@ _CSV_FIELDS = [
     "highlight_ratio_after",
     "highlight_ratio_delta",
     "mean_abs_diff",
+    "mask_ratio",
+    "candidate_pixel_ratio",
+    "final_mask_ratio",
+    "mask_ratio_level",
     "error",
 ]
 
