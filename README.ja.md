@@ -132,6 +132,9 @@ RealityScan へ取り込めます。**クリーン画像は出力しません。
 （`python main.py -i ... -o ...`、サブコマンド無し）も ReflectMask として動作し、旧 `--realityscan`
 フラグも引き続き受理します。
 
+**GPU/重みが無い場合は** `--backend luma` を付けると、モデル不要の純輝度マスクになります
+（`--rs-gate` が輝度しきい値。高め＝タイトに保つ）。出力フォルダ構成は同じで、A/B のベースラインにも便利です。
+
 ### Diagnostic プレビュー / Cleaned 出力（実験的）
 ```powershell
 python main.py diagnostic --input "D:\in" --output "D:\out" --recursive   # マスク + プレビュー + ヒートマップ

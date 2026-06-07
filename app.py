@@ -24,7 +24,7 @@ import streamlit as st  # noqa: E402
 
 from src.image_io import SUPPORTED_EXTS  # noqa: E402
 from src.unreflect_batch import (  # noqa: E402
-    BatchConfig, run_batch, resolve_device, load_model, resolve_mode_defaults,
+    BatchConfig, run_batch, resolve_device, load_model,
     WeightsMissingError, ModelLoadError, weights_status, download_weights,
 )
 
@@ -55,7 +55,6 @@ MODE_LABELS = {
 mode = st.radio(
     "Mode", list(MODE_LABELS), index=0, format_func=lambda m: MODE_LABELS[m],
 )
-mode_def = resolve_mode_defaults(mode)
 
 if mode == "reflectmask":
     st.success(
@@ -144,6 +143,13 @@ with st.sidebar:
     st.divider()
     st.subheader("Run")
     device = st.selectbox("Device", ["auto", "cuda", "cpu"], index=0)
+    backend = st.selectbox(
+        "Detection backend", ["unreflect", "luma"], index=0,
+        format_func=lambda b: {"unreflect": "UnReflectAnything (AI, GPU + weights)",
+                               "luma": "Pure luma (no GPU / no weights)"}[b],
+        help="Pure luma needs no model — it uses the brightness gate above as the luma "
+             "level. Use it when you have no GPU/weights, or as an A/B baseline.",
+    )
     recursive = st.checkbox("Recurse into sub-folders", value=True)
     overwrite = st.checkbox("Overwrite existing outputs", value=False)
     limit = st.number_input("Test mode: first N images (0 = all)", min_value=0, value=0, step=1)
@@ -190,7 +196,8 @@ if run:
         st.error("Please set both an input and an output folder.")
         st.stop()
 
-    realityscan = mode_def["realityscan"]
+    # Mask-first defaults (realityscan / previews / no cleaned image) are resolved by
+    # BatchConfig.__post_init__ from the mode; pass the raw toggles here.
     cfg = BatchConfig(
         input_dir=Path(input_dir),
         output_dir=Path(output_dir),
@@ -198,9 +205,10 @@ if run:
         exts=tuple(exts) if exts else SUPPORTED_EXTS,
         device=device,
         mode=mode,
+        backend=backend,
         overwrite=overwrite,
-        make_preview=mode_def["make_preview"],
-        heatmap=mode_def["heatmap"],
+        make_preview=False,
+        heatmap=False,
         limit=int(limit) or None,
         max_size=int(max_size) or None,
         jpeg_quality=int(jpeg_quality),
@@ -210,7 +218,7 @@ if run:
         mask_composite=mask_composite,
         mask_composite_level=float(mask_level),
         mask_composite_dilation=int(mask_dilation),
-        realityscan=realityscan,
+        realityscan=False,
         rs_copy_originals=rs_copy_originals,
         rs_drop_level=float(rs_drop),
         rs_highlight_gate=float(rs_gate),
@@ -219,14 +227,18 @@ if run:
         use_exiftool=use_exiftool,
     )
 
-    # Resolve device and load (cached) model once per session.
-    dev_resolved, dev_note = resolve_device(device)
-    try:
-        with st.spinner(f"Loading model on {dev_resolved} (cached after first run)…"):
-            model = _cached_model(dev_resolved)
-    except (WeightsMissingError, ModelLoadError) as e:
-        st.error(f"Setup problem:\n\n{e}")
-        st.stop()
+    # Backend B (luma) needs no model / weights / GPU; only the AI backend loads it.
+    if backend == "luma":
+        model = None
+        dev_resolved, dev_note = "cpu", "pure-luma backend (no model)"
+    else:
+        dev_resolved, dev_note = resolve_device(device)
+        try:
+            with st.spinner(f"Loading model on {dev_resolved} (cached after first run)…"):
+                model = _cached_model(dev_resolved)
+        except (WeightsMissingError, ModelLoadError) as e:
+            st.error(f"Setup problem:\n\n{e}")
+            st.stop()
 
     progress = st.progress(0.0, text="Starting…")
 
@@ -249,7 +261,7 @@ if run:
     st.success(f"Mode: **{summary.get('mode')}**  •  Output: {summary.get('output_dir')}  •  logs in /logs")
 
     # RealityScan masks: the primary product in the mask-first modes.
-    if realityscan:
+    if cfg.realityscan:
         rs_dir = Path(output_dir) / "realityscan"
         st.subheader("RealityScan alignment masks")
         st.success(f"Mask folder: {rs_dir}")

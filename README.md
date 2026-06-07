@@ -145,6 +145,10 @@ This writes `‹output›\realityscan\` — a byte-exact copy of each original +
 The legacy flat form (`python main.py -i ... -o ...`, no subcommand) now runs ReflectMask
 too, and the old `--realityscan` flag is still accepted.
 
+**No GPU / no weights?** Add `--backend luma` for a pure-brightness mask (no model) —
+`--rs-gate` becomes the luma threshold (keep it high/tight). Same importable
+`realityscan/` folder; handy as a fast A/B baseline too.
+
 ### Diagnostic preview / Cleaned export (experimental)
 ```powershell
 python main.py diagnostic --input "D:\in" --output "D:\out" --recursive   # masks + previews + heatmaps

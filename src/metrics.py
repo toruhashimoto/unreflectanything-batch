@@ -237,3 +237,37 @@ def reflection_exclusion_mask(
             "final_mask_ratio": round(float((mask == 0).mean()) * 100.0, 3),
         }
     return mask
+
+
+def luma_exclusion_mask(
+    rgb: np.ndarray,
+    level: float = 243.0,
+    dilation: int = 2,
+    open_radius: int = 1,
+    return_stats: bool = False,
+):
+    """Pure-luminance RealityScan exclusion mask — **no model, no GPU** (Backend B).
+
+    Marks pixels brighter than ``level`` (luma 0-255) as excluded reflection, in the
+    same polarity as :func:`reflection_exclusion_mask`: ``0`` (black) = **exclude**,
+    ``255`` (white) = **keep**. A fast, deterministic fallback for when the
+    UnReflectAnything weights / GPU aren't available, or as an A/B baseline.
+
+    Luma alone cannot tell a blown specular from a bright *diffuse* surface (sky, white
+    paint, light bodywork), so keep ``level`` HIGH (tight) to avoid masking those.
+    ``open_radius`` despeckles and ``dilation`` covers reflection halos — keep both small.
+    With ``return_stats`` returns ``(mask, stats)`` (candidate ratio before morphology,
+    final ratio after).
+    """
+    luma = to_luma(np.asarray(rgb))
+    refl_bool = luma >= level
+    candidate_ratio = float(refl_bool.mean()) * 100.0
+
+    refl = _morph_clean(refl_bool.astype(np.uint8), open_radius, dilation)
+    mask = np.where(refl > 0, np.uint8(0), np.uint8(255))  # bright reflection -> black (excluded)
+    if return_stats:
+        return mask, {
+            "candidate_pixel_ratio": round(candidate_ratio, 3),
+            "final_mask_ratio": round(float((mask == 0).mean()) * 100.0, 3),
+        }
+    return mask

@@ -198,8 +198,19 @@ class BatchConfig:
         self.input_dir = Path(self.input_dir)
         self.output_dir = Path(self.output_dir)
         self.exts = image_io.normalize_exts(self.exts)
+        # Resolve the product mode's implied defaults so a BatchConfig built with just
+        # mode="reflectmask" is self-consistent (mask-first: emit the mask, no cleaned
+        # image) whether it comes from the CLI, the GUI, or a direct caller. Explicit
+        # values are only ever turned ON by the mode, never off.
+        md = resolve_mode_defaults(self.mode)
         if self.write_cleaned is None:
-            self.write_cleaned = (self.mode == "clean")
+            self.write_cleaned = md["write_cleaned"]
+        if md["realityscan"]:
+            self.realityscan = True
+        if md["make_preview"]:
+            self.make_preview = True
+        if md["heatmap"]:
+            self.heatmap = True
 
     def params_dict(self) -> dict:
         return {
@@ -336,14 +347,16 @@ def process_one(
         subdirs["realityscan"] / rel.parent / realityscan_mod.mask_filename(src.name, cfg.rs_separator)
         if cfg.realityscan else None
     )
+    luma_backend = (cfg.backend == "luma")
     record: dict = {
         "status": "ok",
-        "processed_by": PROCESSED_BY,
+        "processed_by": "luma-gate" if luma_backend else PROCESSED_BY,
         "source": str(src),
         "output": str(dst),
-        "model": MODEL_NAME,
-        "model_version": _pkg_version(),
+        "model": "pure-luma" if luma_backend else MODEL_NAME,
+        "model_version": "n/a" if luma_backend else _pkg_version(),
         "device": device,
+        "backend": cfg.backend,
         "params": cfg.params_dict(),
     }
 
@@ -379,22 +392,27 @@ def process_one(
 
         before_pil = image_io.load_rgb(proc_input)
 
-        # Run the model -> lossless temp PNG (avoids a double JPEG encode).
-        tmp_out = tmp_dir / (rel.as_posix().replace("/", "__") + ".out.png")
-        tmp_out.parent.mkdir(parents=True, exist_ok=True)
-        _run_inference_to_file(model, proc_input, tmp_out, cfg)
-        after_pil = image_io.load_rgb(tmp_out)
+        if luma_backend:
+            # Backend B: no model. The image is not modified; the exclusion mask is
+            # derived from a pure brightness gate on the original (below).
+            after_pil = before_pil
+        else:
+            # Run the model -> lossless temp PNG (avoids a double JPEG encode).
+            tmp_out = tmp_dir / (rel.as_posix().replace("/", "__") + ".out.png")
+            tmp_out.parent.mkdir(parents=True, exist_ok=True)
+            _run_inference_to_file(model, proc_input, tmp_out, cfg)
+            after_pil = image_io.load_rgb(tmp_out)
 
-        # Full-res highlight-gated composite: keep original detail everywhere
-        # except blown highlights (preserves SfM features on high-res inputs).
-        if cfg.mask_composite:
-            comp = metrics_mod.luminance_composite(
-                np.asarray(before_pil), np.asarray(after_pil),
-                level=cfg.mask_composite_level,
-                dilation=cfg.mask_composite_dilation,
-                feather=cfg.mask_composite_feather,
-            )
-            after_pil = Image.fromarray(comp, "RGB")
+            # Full-res highlight-gated composite: keep original detail everywhere
+            # except blown highlights (preserves SfM features on high-res inputs).
+            if cfg.mask_composite:
+                comp = metrics_mod.luminance_composite(
+                    np.asarray(before_pil), np.asarray(after_pil),
+                    level=cfg.mask_composite_level,
+                    dilation=cfg.mask_composite_dilation,
+                    feather=cfg.mask_composite_feather,
+                )
+                after_pil = Image.fromarray(comp, "RGB")
 
         before_arr = np.asarray(before_pil)
         after_arr = np.asarray(after_pil)
@@ -447,14 +465,24 @@ def process_one(
         # side by side so RealityScan auto-attaches the mask layer on import.
         if cfg.realityscan:
             ow, oh = meta["size"]  # native original (w, h)
-            rs_mask, mask_stats = metrics_mod.reflection_exclusion_mask(
-                before_arr, after_arr,
-                drop_level=cfg.rs_drop_level,
-                highlight_gate=cfg.rs_highlight_gate,
-                dilation=cfg.rs_dilation,
-                open_radius=cfg.rs_open,
-                return_stats=True,
-            )
+            if luma_backend:
+                # Pure brightness gate on the original (rs_highlight_gate is the luma level).
+                rs_mask, mask_stats = metrics_mod.luma_exclusion_mask(
+                    before_arr,
+                    level=cfg.rs_highlight_gate,
+                    dilation=cfg.rs_dilation,
+                    open_radius=cfg.rs_open,
+                    return_stats=True,
+                )
+            else:
+                rs_mask, mask_stats = metrics_mod.reflection_exclusion_mask(
+                    before_arr, after_arr,
+                    drop_level=cfg.rs_drop_level,
+                    highlight_gate=cfg.rs_highlight_gate,
+                    dilation=cfg.rs_dilation,
+                    open_radius=cfg.rs_open,
+                    return_stats=True,
+                )
             # The mask is computed at the processed resolution; force it 1:1 with the
             # native original (matters only in --max-size quick mode).
             realityscan_mod.save_mask_png(rs_mask, rs_mask_dst, like_size=(ow, oh))
@@ -534,7 +562,11 @@ def run_batch(
     }
     logger = RunLogger(subdirs["logs"])
 
-    device, device_note = resolve_device(cfg.device)
+    if cfg.backend == "luma":
+        # Backend B needs no GPU, no weights and no model — pure numpy/OpenCV.
+        device, device_note = "cpu", "pure-luma backend (no model / no GPU / no weights)"
+    else:
+        device, device_note = resolve_device(cfg.device)
     summary: dict = {
         "started_at": _now(),
         "mode": cfg.mode,
@@ -561,7 +593,7 @@ def run_batch(
         logger.finalize(summary)
         return summary
 
-    if model is None and not cfg.dry_run:
+    if model is None and not cfg.dry_run and cfg.backend != "luma":
         ok, wdir, _ = weights_status()  # friendly, fast preflight before the slow load
         if not ok:
             raise WeightsMissingError(weights_missing_message(wdir))

@@ -60,6 +60,23 @@ def test_explicit_write_cleaned_overrides_mode():
     assert _cfg(mode="clean", write_cleaned=False).write_cleaned is False
 
 
+# --- mode defaults are enforced in BatchConfig.__post_init__ (self-consistent) --- #
+def test_reflectmask_config_enables_realityscan():
+    c = _cfg(mode="reflectmask")
+    assert c.realityscan is True and c.write_cleaned is False
+
+
+def test_diagnostic_config_enables_previews_and_masks():
+    c = _cfg(mode="diagnostic")
+    assert c.realityscan is True and c.make_preview is True and c.heatmap is True
+    assert c.write_cleaned is False
+
+
+def test_clean_config_has_no_masks_unless_requested():
+    assert _cfg(mode="clean").realityscan is False
+    assert _cfg(mode="clean", realityscan=True).realityscan is True
+
+
 # --------------------------------------------------------------------------- #
 # mask-first skip logic                                                         #
 # --------------------------------------------------------------------------- #
@@ -106,3 +123,8 @@ def test_mask_ratio_warning_level_custom_thresholds():
 def test_config_has_default_mask_thresholds():
     c = _cfg()
     assert c.mask_warn_pct == 5.0 and c.mask_danger_pct == 12.0
+
+
+def test_backend_defaults_to_unreflect():
+    assert _cfg().backend == "unreflect"
+    assert _cfg(backend="luma").backend == "luma"

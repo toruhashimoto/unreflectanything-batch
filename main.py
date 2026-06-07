@@ -66,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="auto = use CUDA if a working GPU is present, else CPU",
     )
     p.add_argument(
+        "--backend", choices=["unreflect", "luma"], default="unreflect",
+        help="reflection-detection backend: 'unreflect' (AI; needs GPU + weights) or "
+             "'luma' (pure brightness gate; no model/GPU/weights, --rs-gate is the luma level)",
+    )
+    p.add_argument(
         "--extensions", default=",".join(SUPPORTED_EXTS),
         help="comma-separated list of extensions to process",
     )
@@ -127,16 +132,16 @@ def main(argv: list[str] | None = None) -> int:
     # engine pulls numpy/PIL but NOT torch — that import stays lazy inside the engine).
     from src.unreflect_batch import (
         BatchConfig, run_batch, WeightsMissingError, ModelLoadError,
-        weights_status, download_weights, resolve_mode_defaults, MODES, DEFAULT_MODE,
+        weights_status, download_weights, MODES, DEFAULT_MODE,
     )
 
     # An optional leading subcommand selects the product mode (default = reflectmask).
     # The legacy flat form and the back-compat `--realityscan` flag still parse as before.
+    # The mode's mask-first defaults are resolved inside BatchConfig.__post_init__.
     mode = DEFAULT_MODE
     if raw and raw[0] in MODES:
         mode = raw.pop(0)
     args = build_parser().parse_args(raw)
-    mode_def = resolve_mode_defaults(mode)
 
     exts = tuple(e for e in (args.extensions or "").replace(" ", ",").split(",") if e)
     cfg = BatchConfig(
@@ -146,9 +151,10 @@ def main(argv: list[str] | None = None) -> int:
         exts=exts,
         device=args.device,
         mode=mode,
+        backend=args.backend,
         overwrite=args.overwrite,
-        make_preview=args.make_preview or mode_def["make_preview"],
-        heatmap=args.heatmap or mode_def["heatmap"],
+        make_preview=args.make_preview,
+        heatmap=args.heatmap,
         emit_mask=args.emit_mask,
         limit=args.limit,
         max_size=args.max_size,
@@ -161,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         mask_composite_level=args.mask_level,
         mask_composite_dilation=args.mask_dilation,
         mask_composite_feather=args.mask_feather,
-        realityscan=args.realityscan or mode_def["realityscan"],
+        realityscan=args.realityscan,
         rs_copy_originals=not args.rs_masks_only,
         rs_separator=args.rs_separator,
         rs_drop_level=args.rs_drop,
