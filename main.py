@@ -31,15 +31,32 @@ if str(ROOT) not in sys.path:
 from src.image_io import SUPPORTED_EXTS  # noqa: E402
 
 
+class _Fmt(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    """Show option defaults AND keep the raw (multi-line) epilog formatting."""
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="unreflect-batch",
+        prog="reflectmask",
         description=(
-            "Batch-remove specular reflections / highlights from photos using "
-            "UnReflectAnything, as an evaluation pre-process for 3D Gaussian "
-            "Splatting / photogrammetry. Originals are never modified."
+            "ReflectMask for RealityScan — generate tight binary alignment masks that "
+            "exclude specular reflections / blown highlights from RealityScan feature "
+            "detection, protecting valid features for high-detail photogrammetry. "
+            "UnReflectAnything is used as the reflection-detection backend. Originals "
+            "are never modified."
         ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog=(
+            "modes (optional leading subcommand; default = reflectmask):\n"
+            "  reflectmask  original images + <name>.mask.png exclusion masks  (DEFAULT, primary)\n"
+            "  diagnostic   reflectmask + before/after previews & diff heatmaps for inspection\n"
+            "  clean        EXPERIMENTAL: export reflection-removed (cleaned) images instead\n"
+            "\n"
+            "examples:\n"
+            "  python main.py reflectmask -i \"D:\\photo_input\" -o \"D:\\rs_reflectmask\" -r\n"
+            "  python main.py -i \"D:\\in\" -o \"D:\\out\" -r          (flat form = reflectmask)\n"
+            "  python main.py clean -i \"D:\\in\" -o \"D:\\out\" -r      (cleaned images, experimental)\n"
+        ),
+        formatter_class=_Fmt,
     )
     p.add_argument("--input", "-i", required=True, type=Path, help="input image folder")
     p.add_argument("--output", "-o", required=True, type=Path, help="output folder (must be OUTSIDE input)")
@@ -100,13 +117,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
 
-    # Import the engine lazily so --help works even before torch is installed.
+    # Import the engine lazily so --help works before torch is installed (importing the
+    # engine pulls numpy/PIL but NOT torch — that import stays lazy inside the engine).
     from src.unreflect_batch import (
         BatchConfig, run_batch, WeightsMissingError, ModelLoadError,
-        weights_status, download_weights,
+        weights_status, download_weights, resolve_mode_defaults, MODES, DEFAULT_MODE,
     )
+
+    # An optional leading subcommand selects the product mode (default = reflectmask).
+    # The legacy flat form and the back-compat `--realityscan` flag still parse as before.
+    mode = DEFAULT_MODE
+    if raw and raw[0] in MODES:
+        mode = raw.pop(0)
+    args = build_parser().parse_args(raw)
+    mode_def = resolve_mode_defaults(mode)
 
     exts = tuple(e for e in (args.extensions or "").replace(" ", ",").split(",") if e)
     cfg = BatchConfig(
@@ -115,9 +141,10 @@ def main(argv: list[str] | None = None) -> int:
         recursive=args.recursive,
         exts=exts,
         device=args.device,
+        mode=mode,
         overwrite=args.overwrite,
-        make_preview=args.make_preview,
-        heatmap=args.heatmap,
+        make_preview=args.make_preview or mode_def["make_preview"],
+        heatmap=args.heatmap or mode_def["heatmap"],
         emit_mask=args.emit_mask,
         limit=args.limit,
         max_size=args.max_size,
@@ -130,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         mask_composite_level=args.mask_level,
         mask_composite_dilation=args.mask_dilation,
         mask_composite_feather=args.mask_feather,
-        realityscan=args.realityscan,
+        realityscan=args.realityscan or mode_def["realityscan"],
         rs_copy_originals=not args.rs_masks_only,
         rs_separator=args.rs_separator,
         rs_drop_level=args.rs_drop,
@@ -166,7 +193,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\n[ABORTED] interrupted by user (partial logs were written).", file=sys.stderr)
         return 130
 
-    print("\n=== UnReflect Batch summary ===")
+    print("\n=== ReflectMask for RealityScan — summary ===")
+    print(f"  mode        : {summary.get('mode')}  (backend: {summary.get('backend')})")
     print(f"  device      : {summary.get('device')}  ({summary.get('device_note')})")
     print(f"  candidates  : {summary.get('num_candidates')}")
     print(f"  processed   : {summary.get('processed_ok', 0)}")

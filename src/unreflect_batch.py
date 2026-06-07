@@ -35,6 +35,60 @@ from .logger import RunLogger, PROCESSED_BY
 
 MODEL_NAME = "UnReflectAnything"
 
+# Top-level application modes (v0.2: ReflectMask — the RealityScan alignment mask —
+# is the primary product; cleaned-image export is the experimental `clean` mode).
+MODES = ("reflectmask", "diagnostic", "clean")
+DEFAULT_MODE = "reflectmask"
+
+
+def resolve_mode_defaults(mode: str) -> dict:
+    """Map a top-level mode to the BatchConfig fields it implies.
+
+    ReflectMask (default) and Diagnostic are *mask-first*: the deliverable is the
+    RealityScan exclusion mask (plus a byte-exact copy of the untouched original),
+    and the cleaned image is NOT written. Cleaned-image export is the experimental
+    ``clean`` mode. Explicit CLI/GUI flags may still turn extra artifacts on.
+    """
+    mode = (mode or DEFAULT_MODE).lower()
+    if mode == "clean":
+        return {"realityscan": False, "write_cleaned": True,
+                "rs_copy_originals": True, "make_preview": False, "heatmap": False}
+    if mode == "diagnostic":
+        return {"realityscan": True, "write_cleaned": False,
+                "rs_copy_originals": True, "make_preview": True, "heatmap": True}
+    # reflectmask (default)
+    return {"realityscan": True, "write_cleaned": False,
+            "rs_copy_originals": True, "make_preview": False, "heatmap": False}
+
+
+def pending_outputs(write_cleaned: bool, realityscan: bool, dst: Path,
+                    rs_mask_dst: Optional[Path]) -> list:
+    """The deliverables that must already exist for an image to count as 'done'.
+
+    Mode-aware so the no-overwrite skip logic keys off the *primary* output: the
+    cleaned image in ``clean`` mode, the RealityScan mask in the mask-first modes
+    (and both when a clean run also emits masks).
+    """
+    outs = []
+    if write_cleaned:
+        outs.append(dst)
+    if realityscan and rs_mask_dst is not None:
+        outs.append(rs_mask_dst)
+    return outs or [dst]
+
+
+def mask_ratio_warning_level(pct: float, warn: float = 5.0, danger: float = 12.0) -> str:
+    """Classify an excluded-pixel percentage: ``'ok' | 'warning' | 'danger'``.
+
+    Over-masking removes valid features and hurts high-detail RealityScan alignment,
+    so a large excluded area is a danger signal, not a success.
+    """
+    if pct > danger:
+        return "danger"
+    if pct > warn:
+        return "warning"
+    return "ok"
+
 
 class WeightsMissingError(RuntimeError):
     """Raised when the pretrained weights have not been downloaded yet."""
@@ -96,6 +150,11 @@ class BatchConfig:
     recursive: bool = False
     exts: tuple[str, ...] = image_io.SUPPORTED_EXTS
     device: str = "auto"  # auto | cuda | cpu
+    mode: str = DEFAULT_MODE  # reflectmask | diagnostic | clean (top-level product mode)
+    backend: str = "unreflect"  # reflection-candidate backend: unreflect (A) | luma (B, later)
+    # None -> derived from mode in __post_init__ (clean=True, else False). The mask-first
+    # modes never write the cleaned image; the deliverable is the RealityScan mask.
+    write_cleaned: Optional[bool] = None
     overwrite: bool = False
     make_preview: bool = False
     heatmap: bool = False
@@ -134,9 +193,14 @@ class BatchConfig:
         self.input_dir = Path(self.input_dir)
         self.output_dir = Path(self.output_dir)
         self.exts = image_io.normalize_exts(self.exts)
+        if self.write_cleaned is None:
+            self.write_cleaned = (self.mode == "clean")
 
     def params_dict(self) -> dict:
         return {
+            "mode": self.mode,
+            "backend": self.backend,
+            "write_cleaned": self.write_cleaned,
             "threshold": self.threshold,
             "dilation": self.dilation,
             "batch_size": self.batch_size,
@@ -280,14 +344,12 @@ def process_one(
         meta = image_io.read_metadata(src)
         record["input_size"] = list(meta["size"])  # (w, h)
 
-        # No-overwrite default. The cleaned image is the primary output, but a
-        # RealityScan mask is a separately-requested deliverable: if it's still missing
-        # we must run (inference is required to build it) even when the cleaned image
-        # already exists — otherwise re-running with --realityscan would silently
-        # produce nothing. We just keep the existing cleaned image in that case.
-        cleaned_exists = dst.exists()
-        rs_pending = rs_mask_dst is not None and not rs_mask_dst.exists()
-        if cleaned_exists and not cfg.overwrite and not rs_pending:
+        # No-overwrite default, mode-aware: skip only when EVERY requested deliverable
+        # for this image already exists (the cleaned image in `clean` mode, the
+        # RealityScan mask in the mask-first modes, or both). Inference still runs when
+        # any required output is missing, since the mask is derived from it.
+        required = pending_outputs(cfg.write_cleaned, cfg.realityscan, dst, rs_mask_dst)
+        if all(p.exists() for p in required) and not cfg.overwrite:
             record["status"] = "skipped"
             record["error"] = "output exists (use --overwrite to replace)"
             record["duration_sec"] = round(time.perf_counter() - t0, 4)
@@ -334,14 +396,19 @@ def process_one(
             before_arr, after_arr, cfg.highlight_level
         )
 
-        # Save the cleaned image (format/EXIF/ICC preserved from the original src).
-        # If it already exists and we only ran to (re)build a RealityScan mask, keep it.
-        if cleaned_exists and not cfg.overwrite:
-            record["note"] = "cleaned output already existed and was kept; ran for RealityScan mask only"
+        # Cleaned image: only written in cleaned-export (`clean`) mode. The mask-first
+        # modes (reflectmask/diagnostic) keep the originals untouched and emit the
+        # RealityScan mask as the deliverable, so no cleaned image is produced here.
+        if cfg.write_cleaned:
+            if dst.exists() and not cfg.overwrite:
+                record["note"] = "cleaned output already existed and was kept"
+            else:
+                image_io.save_processed(
+                    src, after_pil, dst, jpeg_quality=cfg.jpeg_quality, use_exiftool=cfg.use_exiftool
+                )
+            record["output"] = str(dst)
         else:
-            image_io.save_processed(
-                src, after_pil, dst, jpeg_quality=cfg.jpeg_quality, use_exiftool=cfg.use_exiftool
-            )
+            record["output"] = str(rs_mask_dst) if rs_mask_dst is not None else str(dst)
 
         # Optional artifacts.
         if cfg.heatmap or cfg.make_preview:
@@ -384,7 +451,10 @@ def process_one(
             # native original (matters only in --max-size quick mode).
             realityscan_mod.save_mask_png(rs_mask, rs_mask_dst, like_size=(ow, oh))
             record["realityscan_mask"] = str(rs_mask_dst)
-            record["realityscan_excluded_pct"] = round(float((rs_mask == 0).mean()) * 100.0, 3)
+            excluded_pct = round(float((rs_mask == 0).mean()) * 100.0, 3)
+            record["realityscan_excluded_pct"] = excluded_pct
+            record["mask_ratio"] = excluded_pct  # alias: % of pixels excluded from alignment
+            record["mask_ratio_level"] = mask_ratio_warning_level(excluded_pct)
             if cfg.rs_copy_originals:
                 img_dst = subdirs["realityscan"] / rel
                 realityscan_mod.copy_source_image(src, img_dst)
@@ -455,6 +525,8 @@ def run_batch(
     device, device_note = resolve_device(cfg.device)
     summary: dict = {
         "started_at": _now(),
+        "mode": cfg.mode,
+        "backend": cfg.backend,
         "model": MODEL_NAME,
         "model_version": _pkg_version(),
         "device": device,

@@ -1,30 +1,38 @@
-# UnReflect Batch（日本語）
+# ReflectMask for RealityScan（日本語）
 
 [![CI](https://github.com/toruhashimoto/unreflectanything-batch/actions/workflows/ci.yml/badge.svg)](https://github.com/toruhashimoto/unreflectanything-batch/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Upstream: UnReflectAnything](https://img.shields.io/badge/upstream-UnReflectAnything-blue)](https://github.com/alberto-rota/UnReflectAnything)
-[![3DGS: LichtFeld Studio](https://img.shields.io/badge/3DGS-LichtFeld%20Studio-orange)](https://github.com/MrNeRF/LichtFeld-Studio)
+[![Backend: UnReflectAnything](https://img.shields.io/badge/backend-UnReflectAnything-blue)](https://github.com/alberto-rota/UnReflectAnything)
+[![For: RealityScan](https://img.shields.io/badge/for-RealityScan%202.x-orange)](https://www.realityscan.com/)
 
 [English](README.md) · **日本語**
 
-> **独立ラッパーです。** 本プロジェクトは
-> [UnReflectAnything](https://github.com/alberto-rota/UnReflectAnything) の
-> **独立したバッチ用ラッパー**であり、本家の作者とは**無関係（非公認）**です。本家のコードは
-> **一切同梱していません**（モデルは PyPI から導入し、公開 API/CLI 経由で呼び出します）。
+> **RealityScan 向けのマスク優先ワークフローです。**（リポジトリ／Python パッケージ名は
+> `unreflectanything-batch` のまま）**ReflectMask** は、鏡面反射・白飛びハイライトを特徴抽出から
+> 除外する**タイトな二値アライメントマスク**を生成し、RealityScan が有効な特徴点を保持して
+> **高詳細フォトグラメトリ**でより安定してアライメントできるよう支援します。
+> [UnReflectAnything](https://github.com/alberto-rota/UnReflectAnything) は**反射検出の backend**
+> としてのみ使用します（本家とは無関係・非公認、コードは一切同梱せず PyPI 経由で公開 API を呼ぶだけ）。
 
-入力写真から **鏡面反射・白飛びハイライト**を一括除去し、**3D Gaussian Splatting（3DGS）/
-フォトグラメトリ**（RealityScan・Postshot・Nerfstudio・COLMAP など）の**前処理**として使うための
-Windows 向けローカルアプリです。
+**目的は「写真をきれいに見せること」ではありません。** 鏡面反射や白飛びが生む**不安定で視点依存な
+特徴点を除外**しつつ、**有効な特徴点をできるだけ多く保持**することで、RealityScan の再構成をより
+高詳細・安定にすることが目的です。
 
-[**UnReflectAnything**](https://alberto-rota.github.io/UnReflectAnything/) を呼び出すだけの
-**薄い・安全なラッパー**で、研究コードは改変しません。**元画像は決して変更せず**、クリーン化画像・
-before/after プレビュー・差分ヒートマップ・各画像のログを**別フォルダ**に出力します。**ファイル名と
-サブフォルダ構成は維持**するので、既存の SfM/3DGS パイプラインへそのまま渡せます。
+**推奨出力 = 元画像 + 各写真 1 枚の タイトな `‹名前›.mask.png`**（白＝採用、黒＝除外する反射）。
+元画像は**決して改変せず** RealityScan への主入力のまま。アライメント時に不安定な反射画素だけを無視します。
+反射を*除去した*クリーン画像出力も残していますが、**experimental／diagnostic 扱い**に降格しました。
 
-> ⚠️ **評価用途限定。** 単一画像の反射除去には**マルチビュー整合の保証がありません**。視点ごとに
-> 異なる内容を補完してしまうと SfM の特徴照合を**悪化**させ得ます。出力は「**可視化・品質改善の評価**」
-> 目的として扱い、測定の正データとはみなさないでください。必ず再構成を**除去あり/なしで A/B 比較**
-> してから採用を判断してください（→ [推奨ワークフロー](#推奨ワークフロー3dgs--フォトグラメトリ)）。
+### モード
+| モード | 出力 | 用途 |
+|---|---|---|
+| **`reflectmask`**（既定） | 元画像コピー + `‹名前›.mask.png` 除外マスク | **推奨：RealityScan アライメントマスク生成** |
+| **`diagnostic`** | マスク **＋** before/after プレビュー・差分ヒートマップ | backend が何を拾うかの検証用 |
+| **`clean`**（実験的） | 反射除去（クリーン化）画像 | A/B 比較専用——多くの場合アライメントには不利 |
+
+> ⚠️ **広く消すのではなく、タイトに。** マスクを広げすぎると明るい*拡散面*（空・白い塗装/車体）まで
+> 除外し、特徴の宝庫を潰してアライメントを分裂させます。ゲートはタイトに——実行時に平均除外率を表示し、
+> **5%（warning）／12%（danger）**で警告します。大きなマスクが必要な素材は、**マスク無しの元画像**が
+> 最良のことが多いです。必ず A/B 比較を。
 
 ---
 
@@ -107,17 +115,30 @@ pip install -r requirements.txt
 ```powershell
 run_app.bat
 ```
-入力・出力フォルダを選び、サイドバーで設定して **Run batch**。進捗・サマリ・before/after サンプルが
-表示されます。GUI は CLI と同じエンジンを呼びます。
+**モード**（既定 **ReflectMask**）を選び、入力・出力フォルダを設定し、サイドバーで RealityScan
+マスク設定を調整して **Run**。進捗・平均除外率（過剰マスク警告つき）・RealityScan 取り込み手順・
+サンプルマスクが表示されます。GUI は CLI と同じエンジンを呼びます。
 
 ## 5. 使い方 — CLI
 
-### バッチ（メイン機能）
+先頭の任意サブコマンドでモードを選択（既定 = `reflectmask`）。
+
+### ReflectMask — RealityScan アライメントマスク生成（メイン機能）
 ```powershell
-python main.py --input "D:\photo_input" --output "D:\photo_unreflect" --recursive --make-preview --device cuda
+python main.py reflectmask --input "D:\photo_input" --output "D:\rs_reflectmask" --recursive --device cuda
+```
+`‹output›\realityscan\` に、各元画像のバイト完全コピー + `‹名前›.mask.png` を出力し、そのまま
+RealityScan へ取り込めます。**クリーン画像は出力しません。** 旧来のフラット形式
+（`python main.py -i ... -o ...`、サブコマンド無し）も ReflectMask として動作し、旧 `--realityscan`
+フラグも引き続き受理します。
+
+### Diagnostic プレビュー / Cleaned 出力（実験的）
+```powershell
+python main.py diagnostic --input "D:\in" --output "D:\out" --recursive   # マスク + プレビュー + ヒートマップ
+python main.py clean      --input "D:\in" --output "D:\out" --recursive   # 実験的：クリーン化画像
 ```
 
-主なオプション：
+主なオプション（全モード共通）：
 
 | フラグ | 既定 | 説明 |
 |---|---|---|

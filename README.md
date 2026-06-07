@@ -1,34 +1,44 @@
-# UnReflect Batch
+# ReflectMask for RealityScan
 
 [![CI](https://github.com/toruhashimoto/unreflectanything-batch/actions/workflows/ci.yml/badge.svg)](https://github.com/toruhashimoto/unreflectanything-batch/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Upstream: UnReflectAnything](https://img.shields.io/badge/upstream-UnReflectAnything-blue)](https://github.com/alberto-rota/UnReflectAnything)
-[![3DGS: LichtFeld Studio](https://img.shields.io/badge/3DGS-LichtFeld%20Studio-orange)](https://github.com/MrNeRF/LichtFeld-Studio)
+[![Backend: UnReflectAnything](https://img.shields.io/badge/backend-UnReflectAnything-blue)](https://github.com/alberto-rota/UnReflectAnything)
+[![For: RealityScan](https://img.shields.io/badge/for-RealityScan%202.x-orange)](https://www.realityscan.com/)
 
 **English** · [日本語 (Japanese)](README.ja.md)
 
-> **Independent wrapper.** This project is an independent batch wrapper for
-> [UnReflectAnything](https://github.com/alberto-rota/UnReflectAnything) — it is **not
-> affiliated with or endorsed by** the original authors, and bundles **none** of their
-> code (the model is installed from PyPI and called via its public API/CLI).
+> **Mask-first workflow for RealityScan.** *(The repository & Python package name remain
+> `unreflectanything-batch`.)* **ReflectMask** generates **tight binary alignment masks**
+> that exclude specular reflections / blown highlights from feature detection, so
+> RealityScan keeps its valid features and aligns more robustly for **high-detail
+> photogrammetry**. [UnReflectAnything](https://github.com/alberto-rota/UnReflectAnything)
+> is used only as the **reflection-detection backend** — this project is independent of,
+> and not endorsed by, its authors and bundles **none** of their code (installed from
+> PyPI, called via its public API).
 
-Batch-remove **specular reflections / blown-out highlights** from input photos using
-[**UnReflectAnything**](https://alberto-rota.github.io/UnReflectAnything/), as a
-**pre-processing step for 3D Gaussian Splatting (3DGS) and photogrammetry**
-(RealityScan, Postshot, Nerfstudio, COLMAP, …).
+**The goal is not to make photos look clean.** It is to remove the unstable,
+view-dependent feature points that specular reflection and blown highlights create — **while
+preserving as many valid features as possible** — so your RealityScan reconstruction comes
+out more detailed and more stable.
 
-It is a thin, safe **wrapper** around the `unreflectanything` package — it does not
-modify the research code. Originals are never touched; cleaned images plus
-before/after previews, diff heatmaps and per-image logs are written to a separate
-output folder, with **file names and sub-folder structure preserved** so the result
-drops straight into your existing SfM/3DGS pipeline.
+**Recommended output = your original images + one tight `‹name›.mask.png` per photo**
+(white = kept, black = excluded reflection). Originals are **never modified** and stay the
+primary input to RealityScan; only the unreliable reflection pixels are ignored during
+alignment. Reflection-*removed* (cleaned) images still exist, but are now **experimental /
+diagnostic only**.
 
-> ⚠️ **Evaluation-only.** Single-image reflection removal has **no multi-view
-> consistency guarantee** — the network can inpaint specular regions differently in
-> different views, which *can hurt* SfM feature matching. Treat the output as a tool
-> to **improve a problematic photo set for visualization/quality experiments**, not as
-> measurement ground truth. Always A/B test your reconstruction *with vs. without* the
-> cleaned images. See [Recommended workflow](#recommended-workflow-for-3dgs--photogrammetry).
+### Modes
+| Mode | Produces | Use it for |
+|---|---|---|
+| **`reflectmask`** (default) | original copy + `‹name›.mask.png` exclusion masks | **the recommended RealityScan alignment workflow** |
+| **`diagnostic`** | masks **+** before/after previews & diff heatmaps | inspecting what the backend flags before committing |
+| **`clean`** (experimental) | reflection-removed (cleaned) images | A/B experiments only — usually worse for alignment |
+
+> ⚠️ **Tight masks, not aggressive removal.** Over-masking excludes bright *diffuse*
+> surfaces (sky, white paint/bodywork), removing feature-rich regions and fragmenting the
+> reconstruction. Keep the gate tight — the run reports the average % of pixels excluded
+> and flags it above **5 % (warning) / 12 % (danger)**. If a set needs a large mask, it
+> probably reconstructs best from the **originals with no mask at all**. Always A/B test.
 
 ---
 
@@ -117,18 +127,31 @@ mid-run crash).
 ```powershell
 run_app.bat
 ```
-Pick an input and output folder, tweak options in the sidebar, press **Run batch**.
-You get live progress, a summary, and before/after samples. The GUI calls the exact
-same engine as the CLI.
+Pick a **mode** (default **ReflectMask**), set an input and output folder, tune the
+RealityScan-mask settings in the sidebar, and press **Run**. You get live progress, the
+average % of pixels excluded (with over-masking warnings), the RealityScan import steps,
+and sample masks. The GUI calls the exact same engine as the CLI.
 
 ## 5. Usage — CLI
 
-### Batch (the main tool)
+Three modes via an optional leading subcommand (default = `reflectmask`).
+
+### ReflectMask — generate RealityScan alignment masks (the main tool)
 ```powershell
-python main.py --input "D:\photo_input" --output "D:\photo_unreflect" --recursive --make-preview --device cuda
+python main.py reflectmask --input "D:\photo_input" --output "D:\rs_reflectmask" --recursive --device cuda
+```
+This writes `‹output›\realityscan\` — a byte-exact copy of each original + its
+`‹name›.mask.png` — ready to import into RealityScan. **No cleaned images are written.**
+The legacy flat form (`python main.py -i ... -o ...`, no subcommand) now runs ReflectMask
+too, and the old `--realityscan` flag is still accepted.
+
+### Diagnostic preview / Cleaned export (experimental)
+```powershell
+python main.py diagnostic --input "D:\in" --output "D:\out" --recursive   # masks + previews + heatmaps
+python main.py clean      --input "D:\in" --output "D:\out" --recursive   # EXPERIMENTAL cleaned images
 ```
 
-Full options:
+Full options (apply to every mode):
 
 | Flag | Default | Description |
 |---|---|---|
