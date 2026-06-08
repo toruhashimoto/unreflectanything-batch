@@ -144,21 +144,23 @@ def test_resolve_workers_explicit_caps():
 
 
 def test_resolve_workers_auto_luma_targets_io_knee():
-    assert resolve_workers(None, 1000, "luma", 192, None) == 24
+    assert resolve_workers(None, 1000, "luma", 192, None) == 32
 
 
-def test_resolve_workers_auto_ai_caps_at_four():
-    # big batch: capped at the measured-safe AI worker cap (4), also by free VRAM
-    assert resolve_workers(None, 1000, "unreflect", 192, 88) == 4     # cap 4
+def test_resolve_workers_auto_ai_caps_at_eight():
+    # big batch: capped at the measured-safe AI worker cap (8), also by free VRAM
+    assert resolve_workers(None, 1000, "unreflect", 192, 88) == 8     # cap 8
     assert resolve_workers(None, 1000, "unreflect", 192, 20) == 4     # 20/4.5=4 (VRAM)
-    assert resolve_workers(None, 1000, "unreflect", 192, None) == 4   # no VRAM info -> 4
+    assert resolve_workers(None, 1000, "unreflect", 192, None) == 8   # no VRAM info -> 8
 
 
-def test_resolve_workers_ai_small_batch_stays_sequential():
-    # too few images to amortise the per-worker model reload -> sequential (no regression)
-    assert resolve_workers(None, 23, "unreflect", 192, 88) == 1      # <24 -> <1 worker
-    assert resolve_workers(None, 48, "unreflect", 192, 88) == 2      # 48//24 = 2
-    assert resolve_workers(None, 200, "unreflect", 192, 88) == 4     # capped at 4
+def test_resolve_workers_ai_scales_with_batch():
+    # >= ~6 images/worker, capped at 8; tiny batches stay (near-)sequential -> no regression
+    assert resolve_workers(None, 5, "unreflect", 192, 88) == 1       # <6 -> 1
+    assert resolve_workers(None, 16, "unreflect", 192, 88) == 2      # 16//6 = 2
+    assert resolve_workers(None, 24, "unreflect", 192, 88) == 4      # 24//6 = 4
+    assert resolve_workers(None, 48, "unreflect", 192, 88) == 8      # 48//6=8 -> measured 2.9x
+    assert resolve_workers(None, 200, "unreflect", 192, 88) == 8     # capped at 8
 
 
 def test_resolve_workers_ai_explicit_never_ooms():

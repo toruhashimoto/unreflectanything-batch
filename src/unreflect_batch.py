@@ -580,11 +580,12 @@ def _free_vram_gb(device: str) -> Optional[float]:
         return None
 
 
-# AI workers each reload the ~3.4 GB model (a contended startup "storm"). Measured on this
-# box: 4 workers x 60 imgs = ~2.4x; 16 workers x 24 imgs = ~0.36x (disaster). So amortise
-# the load (~24 img/worker was enough) and cap the worker count at the measured-safe 4.
-_AI_MIN_IMAGES_PER_WORKER = 24
-_AI_MAX_WORKERS = 4
+# AI workers each reload the ~3.4 GB model (a contended startup "storm"). Measured CLEAN
+# (no other GPU/CPU load) on 48 imgs: 4 workers = 2.3x, 8 = 2.9x (best), 16 = 0.3x
+# (DISASTER -- 16 concurrent model loads thrash disk/CUDA). So cap the worker count at the
+# measured-safe 8, and keep >= ~6 images/worker so the one-time load amortises.
+_AI_MIN_IMAGES_PER_WORKER = 6
+_AI_MAX_WORKERS = 8
 
 
 def resolve_workers(requested, n_images, backend, cores, free_vram_gb) -> int:
@@ -604,7 +605,7 @@ def resolve_workers(requested, n_images, backend, cores, free_vram_gb) -> int:
     if backend == "luma":
         if requested and int(requested) > 0:
             return min(int(requested), hard)
-        return min(hard, 24)  # past ~16-24 it is disk-I/O bound, not CPU
+        return min(hard, 32)  # measured: still gaining at 32 (13.8x); disk-I/O bound past it
     # AI backend: free-VRAM cap (~one model + headroom per worker) guards against OOM.
     vram_cap = int(free_vram_gb / 4.5) if free_vram_gb else _AI_MAX_WORKERS
     if requested and int(requested) > 0:
