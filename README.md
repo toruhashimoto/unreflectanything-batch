@@ -163,6 +163,7 @@ Full options (apply to every mode):
 | `--output, -o` | — | Output folder, **must be outside input** (**required**) |
 | `--recursive, -r` | off | Recurse into sub-folders (structure mirrored in output) |
 | `--device, -d` | `auto` | `auto` \| `cuda` \| `cpu` (auto = GPU if a *working* one is present) |
+| `--backend` | `unreflect` | Reflection-detection backend: `unreflect` (AI; needs GPU+weights) or `luma` (pure brightness gate; no model/GPU/weights, `--rs-gate` = luma level) |
 | `--extensions` | `.jpg,.jpeg,.png,.tif,.tiff` | Comma-separated extensions to process |
 | `--make-preview` | off | Side-by-side before/after into `preview_compare/` |
 | `--heatmap` | off | Per-image luma-difference heatmaps into `heatmap/` |
@@ -182,6 +183,8 @@ Full options (apply to every mode):
 | `--rs-open` | `1` | RealityScan mask: remove specks smaller than this radius (morphological open) |
 | `--rs-masks-only` | off | RealityScan: write only the `.mask.png` files (don't copy the originals). The folder is then **not** directly importable — merge each mask into its photo's folder first |
 | `--rs-separator` | `.` | RealityScan mask name separator before `mask` (one of `. _ @ # !`) |
+| `--mask-warn` | `5.0` | Warn when the average % of pixels excluded by the masks exceeds this |
+| `--mask-danger` | `12.0` | Flag DANGER (likely over-masking valid features) when the average % excluded exceeds this |
 | `--exiftool` | off | Copy **all** metadata via exiftool when available (maker notes/GPS/XMP, all formats; slower, per-file). Default = fast piexif/PIL EXIF |
 | `--verbose` | off | Show the engine's own per-image output |
 | `--limit N` | — | **Test mode**: process only the first N images |
@@ -201,13 +204,14 @@ Full options (apply to every mode):
 
 ```
 <output>/
-├── <original tree, original filenames>   # cleaned images (format/size/EXIF preserved)
+├── <original tree, original filenames>   # cleaned images — `clean` mode only (format/size/EXIF preserved)
 │   ├── img001.jpg
 │   └── day2/img777.png
 ├── preview_compare/                      # [Original | UnReflect | (Diff)] strips  (--make-preview)
 ├── heatmap/                              # luma-difference heatmaps               (--heatmap)
 ├── masks/                                # changed-region masks                   (--emit-mask)
-├── realityscan/                          # original copies + ‹name›.mask.png      (--realityscan)
+├── realityscan/                          # original copies + ‹name›.mask.png      (reflectmask / diagnostic)
+├── diagnostic/                           # 6-panel inspection sheets             (diagnostic mode)
 └── logs/
     ├── process_log.jsonl                 # one detailed JSON record per image
     ├── process_log.csv                   # flat summary table
@@ -347,6 +351,17 @@ flag, an environment variable, or `PATH` — nothing is hard-coded.
 - [COLMAP](https://github.com/colmap/colmap/releases) — `--colmap` or `$COLMAP_EXE`
 - [LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio) (for the 3DGS harness) — `--lichtfeld` or `$LICHTFELD_EXE`
 
+### One command — build all four variant sets — `tools/make_ab_sets.py`
+Builds `original` / `reflectmask` / `luma` / `cleaned` in one workspace with a stats
+report and the exact import folder per set. The model loads once for the two AI sets, and
+they are skipped (so it runs with **no GPU/weights**) with `--skip-model` or when the
+weights aren't present:
+```powershell
+python tools\make_ab_sets.py -i "D:\photo_input" -o "D:\ab_work" --recursive
+```
+Then import each set into RealityScan (masked sets = the `realityscan/` sub-folder), align,
+and compare registered images / detail. See `‹work›\ab_sets_report.md`.
+
 ### SfM A/B — `tools/ab_colmap.py`
 Runs a COLMAP sparse reconstruction on each image set and reports registered images,
 3D points, track length and reprojection error.
@@ -430,6 +445,7 @@ UnReflectAnything/
 │   ├── logger.py           # JSONL / CSV / errors / summary
 │   └── unreflect_batch.py  # engine: device select, model load, per-image pipeline
 ├── tools/
+│   ├── make_ab_sets.py     # build original/reflectmask/luma/cleaned variant sets + A/B report
 │   ├── ab_colmap.py        # A/B COLMAP sparse-reconstruction comparison (original vs cleaned)
 │   ├── ab_3dgs.py          # A/B 3D Gaussian Splatting comparison (COLMAP -> LichtFeld -> figures)
 │   ├── make_colmap_masks.py       # luma-gated COLMAP exclusion masks (no model)
