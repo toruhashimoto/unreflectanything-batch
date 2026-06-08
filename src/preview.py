@@ -58,3 +58,52 @@ def make_compare(
         canvas.paste(p, (x, 0))
         x += p.width + _GAP
     return canvas
+
+
+def make_grid(panels, cols: int = 3, max_height: int = 320) -> Image.Image:
+    """Lay out labelled panels row-major in a grid of ``cols`` columns.
+
+    ``panels`` is a list of ``(label, PIL.Image)``. Each panel is height-normalised and
+    captioned; cells are sized to the widest/tallest panel and left-aligned within.
+    """
+    if not panels:
+        raise ValueError("make_grid: no panels")
+    tiles = [_label(_fit_height(img.convert("RGB"), max_height), text) for text, img in panels]
+    cell_w = max(t.width for t in tiles)
+    cell_h = max(t.height for t in tiles)
+    rows = (len(tiles) + cols - 1) // cols
+    total_w = cols * cell_w + _GAP * (cols - 1)
+    total_h = rows * cell_h + _GAP * (rows - 1)
+    canvas = Image.new("RGB", (total_w, total_h), _BG)
+    for i, t in enumerate(tiles):
+        r, c = divmod(i, cols)
+        canvas.paste(t, (c * (cell_w + _GAP), r * (cell_h + _GAP)))
+    return canvas
+
+
+def make_diagnostic(
+    original: Image.Image,
+    cleaned: Image.Image,
+    heatmap: Image.Image,
+    candidate: Image.Image,
+    final_mask: Image.Image,
+    overlay: Image.Image,
+    max_height: int = 300,
+) -> Image.Image:
+    """A single 6-panel inspection sheet for the Diagnostic mode.
+
+    Row 1: Original | Cleaned (backend) | Diff heatmap
+    Row 2: Threshold candidate | Final mask (black = excluded) | Overlay (red = excluded)
+    """
+    return make_grid(
+        [
+            ("Original", original),
+            ("Cleaned (backend)", cleaned),
+            ("Diff heatmap", heatmap),
+            ("Threshold candidate", candidate),
+            ("Final mask (black=excluded)", final_mask),
+            ("Overlay (red=excluded)", overlay),
+        ],
+        cols=3,
+        max_height=max_height,
+    )

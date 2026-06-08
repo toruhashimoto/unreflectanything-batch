@@ -500,6 +500,26 @@ def process_one(
                 realityscan_mod.copy_source_image(src, img_dst)
                 record["realityscan_image"] = str(img_dst)
 
+            # Diagnostic mode: one 6-panel inspection sheet (original / cleaned / diff
+            # heatmap / threshold candidate / final mask / overlay) into diagnostic/.
+            if cfg.mode == "diagnostic":
+                if luma_backend:
+                    cand = metrics_mod.luma_candidate_mask(before_arr, level=cfg.rs_highlight_gate)
+                else:
+                    cand = metrics_mod.reflection_candidate_mask(
+                        before_arr, after_arr, cfg.rs_drop_level, cfg.rs_highlight_gate)
+                hm = metrics_mod.diff_heatmap(before_arr, after_arr)
+                overlay = metrics_mod.mask_overlay(before_arr, rs_mask)
+                diag = preview_mod.make_diagnostic(
+                    before_pil, after_pil, Image.fromarray(hm, "RGB"),
+                    Image.fromarray(cand, "L"), Image.fromarray(rs_mask, "L"),
+                    Image.fromarray(overlay, "RGB"),
+                )
+                diag_path = subdirs["diagnostic"] / rel.with_suffix(".jpg")
+                diag_path.parent.mkdir(parents=True, exist_ok=True)
+                diag.save(diag_path, format="JPEG", quality=90)
+                record["diagnostic"] = str(diag_path)
+
         record["duration_sec"] = round(time.perf_counter() - t0, 4)
         return record
 
@@ -558,6 +578,7 @@ def run_batch(
         "heatmap": cfg.output_dir / "heatmap",
         "masks": cfg.output_dir / "masks",
         "realityscan": cfg.output_dir / "realityscan",
+        "diagnostic": cfg.output_dir / "diagnostic",
         "logs": cfg.output_dir / "logs",
     }
     logger = RunLogger(subdirs["logs"])

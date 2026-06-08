@@ -214,22 +214,10 @@ def reflection_exclusion_mask(
     tiny specks (morphological open) and ``dilation`` grows the excluded region to
     cover reflection halos — keep both small (large values fragment SfM).
     """
-    before = np.asarray(before)
-    after = np.asarray(after)
-    if before.shape != after.shape:
-        h = min(before.shape[0], after.shape[0])
-        w = min(before.shape[1], after.shape[1])
-        before = before[:h, :w]
-        after = after[:h, :w]
+    cand = reflection_candidate_mask(before, after, drop_level, highlight_gate) > 0
+    candidate_ratio = float(cand.mean()) * 100.0  # candidate area BEFORE morphology
 
-    lb = to_luma(before)
-    la = to_luma(after)
-    refl_bool = (lb - la) >= drop_level  # model darkened it -> probable removed highlight
-    if highlight_gate and highlight_gate > 0:
-        refl_bool &= lb >= highlight_gate
-    candidate_ratio = float(refl_bool.mean()) * 100.0  # candidate area BEFORE morphology
-
-    refl = _morph_clean(refl_bool.astype(np.uint8), open_radius, dilation)
+    refl = _morph_clean(cand.astype(np.uint8), open_radius, dilation)
     mask = np.where(refl > 0, np.uint8(0), np.uint8(255))  # reflection -> black (excluded)
     if return_stats:
         return mask, {
@@ -259,11 +247,10 @@ def luma_exclusion_mask(
     With ``return_stats`` returns ``(mask, stats)`` (candidate ratio before morphology,
     final ratio after).
     """
-    luma = to_luma(np.asarray(rgb))
-    refl_bool = luma >= level
-    candidate_ratio = float(refl_bool.mean()) * 100.0
+    cand = luma_candidate_mask(rgb, level) > 0
+    candidate_ratio = float(cand.mean()) * 100.0
 
-    refl = _morph_clean(refl_bool.astype(np.uint8), open_radius, dilation)
+    refl = _morph_clean(cand.astype(np.uint8), open_radius, dilation)
     mask = np.where(refl > 0, np.uint8(0), np.uint8(255))  # bright reflection -> black (excluded)
     if return_stats:
         return mask, {
@@ -271,3 +258,62 @@ def luma_exclusion_mask(
             "final_mask_ratio": round(float((mask == 0).mean()) * 100.0, 3),
         }
     return mask
+
+
+def reflection_candidate_mask(
+    before: np.ndarray,
+    after: np.ndarray,
+    drop_level: float = 12.0,
+    highlight_gate: float = 250.0,
+) -> np.ndarray:
+    """Pre-morphology reflection candidate as 0/255 uint8 (255 = candidate reflection).
+
+    This is exactly what :func:`reflection_exclusion_mask` gates on *before* the
+    morphological open/dilate; exposed so the diagnostic view can show what the
+    threshold selected, separately from the cleaned-up final mask.
+    """
+    before = np.asarray(before)
+    after = np.asarray(after)
+    if before.shape != after.shape:
+        h = min(before.shape[0], after.shape[0])
+        w = min(before.shape[1], after.shape[1])
+        before = before[:h, :w]
+        after = after[:h, :w]
+    lb = to_luma(before)
+    la = to_luma(after)
+    refl = (lb - la) >= drop_level
+    if highlight_gate and highlight_gate > 0:
+        refl &= lb >= highlight_gate
+    return (refl.astype(np.uint8) * 255)
+
+
+def luma_candidate_mask(rgb: np.ndarray, level: float = 243.0) -> np.ndarray:
+    """Pre-morphology pure-luma candidate as 0/255 uint8 (255 = pixel brighter than ``level``)."""
+    return ((to_luma(np.asarray(rgb)) >= level).astype(np.uint8) * 255)
+
+
+def mask_overlay(
+    rgb: np.ndarray,
+    exclusion_mask: np.ndarray,
+    color: tuple = (255, 0, 0),
+    alpha: float = 0.5,
+) -> np.ndarray:
+    """Tint the EXCLUDED region (``exclusion_mask == 0``) of an RGB image for the eye.
+
+    Returns a uint8 RGB copy where pixels the RealityScan mask excludes (black) are
+    blended toward ``color`` by ``alpha`` and kept pixels are unchanged — so you can
+    see exactly what alignment will ignore, overlaid on the photo.
+    """
+    rgb = np.asarray(rgb).astype(np.float32)
+    m = np.asarray(exclusion_mask)
+    if m.ndim == 3:
+        m = m[..., 0]
+    if m.shape != rgb.shape[:2]:
+        h = min(m.shape[0], rgb.shape[0])
+        w = min(m.shape[1], rgb.shape[1])
+        rgb = rgb[:h, :w]
+        m = m[:h, :w]
+    excl = (m == 0)[..., None]
+    tint = np.array(color, dtype=np.float32)
+    out = np.where(excl, rgb * (1.0 - alpha) + tint * alpha, rgb)
+    return np.clip(out, 0, 255).astype(np.uint8)
