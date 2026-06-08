@@ -11,7 +11,7 @@ import pytest
 
 from src.unreflect_batch import (
     BatchConfig, MODES, DEFAULT_MODE,
-    resolve_mode_defaults, pending_outputs, mask_ratio_warning_level,
+    resolve_mode_defaults, pending_outputs, mask_ratio_warning_level, resolve_workers,
 )
 
 
@@ -133,3 +133,39 @@ def test_backend_defaults_to_unreflect():
 def test_config_model_max_size_default():
     assert _cfg().model_max_size == 2048
     assert _cfg(model_max_size=None).model_max_size is None
+
+
+# --- parallel worker count resolution (pure / injectable) --- #
+def test_resolve_workers_explicit_caps():
+    assert resolve_workers(8, 100, "luma", 192, None) == 8        # explicit
+    assert resolve_workers(100, 100, "luma", 192, None) == 61     # Windows 61 cap
+    assert resolve_workers(100, 10, "luma", 192, None) == 10      # <= n_images
+    assert resolve_workers(8, 100, "luma", 4, None) == 4          # <= cores
+
+
+def test_resolve_workers_auto_luma_targets_io_knee():
+    assert resolve_workers(None, 1000, "luma", 192, None) == 24
+
+
+def test_resolve_workers_auto_ai_caps_at_four():
+    # big batch: capped at the measured-safe AI worker cap (4), also by free VRAM
+    assert resolve_workers(None, 1000, "unreflect", 192, 88) == 4     # cap 4
+    assert resolve_workers(None, 1000, "unreflect", 192, 20) == 4     # 20/4.5=4 (VRAM)
+    assert resolve_workers(None, 1000, "unreflect", 192, None) == 4   # no VRAM info -> 4
+
+
+def test_resolve_workers_ai_small_batch_stays_sequential():
+    # too few images to amortise the per-worker model reload -> sequential (no regression)
+    assert resolve_workers(None, 23, "unreflect", 192, 88) == 1      # <24 -> <1 worker
+    assert resolve_workers(None, 48, "unreflect", 192, 88) == 2      # 48//24 = 2
+    assert resolve_workers(None, 200, "unreflect", 192, 88) == 4     # capped at 4
+
+
+def test_resolve_workers_ai_explicit_never_ooms():
+    assert resolve_workers(32, 500, "unreflect", 192, 20) == 4       # explicit capped by VRAM
+    assert resolve_workers(6, 500, "unreflect", 192, 88) == 6        # explicit respected under VRAM
+
+
+def test_resolve_workers_single_image_is_serial():
+    assert resolve_workers(None, 1, "luma", 192, None) == 1
+    assert resolve_workers(16, 1, "unreflect", 192, 88) == 1

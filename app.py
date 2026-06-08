@@ -219,6 +219,8 @@ if run:
         limit=int(limit) or None,
         max_size=int(max_size) or None,
         model_max_size=int(model_max_size) or None,
+        workers=1,  # GUI stays sequential (multiprocessing + Streamlit's spawn don't mix); use the CLI for parallel batches
+
         jpeg_quality=int(jpeg_quality),
         threshold=float(threshold),
         dilation=int(dilation),

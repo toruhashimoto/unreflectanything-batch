@@ -71,6 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
              "'luma' (pure brightness gate; no model/GPU/weights, --rs-gate is the luma level)",
     )
     p.add_argument(
+        "--workers", default="auto", metavar="N",
+        help="parallel worker processes: 'auto' (from CPU cores / free VRAM / the Windows 61 "
+             "cap) or an integer; 1 = sequential. The per-image work is CPU/I-O bound and the "
+             "GPU is mostly idle, so on a many-core box this is the big throughput lever.",
+    )
+    p.add_argument(
         "--extensions", default=",".join(SUPPORTED_EXTS),
         help="comma-separated list of extensions to process",
     )
@@ -145,6 +151,16 @@ def main(argv: list[str] | None = None) -> int:
         mode = raw.pop(0)
     args = build_parser().parse_args(raw)
 
+    _w = str(args.workers).strip().lower()
+    if _w in ("auto", "0", ""):
+        workers = None
+    else:
+        try:
+            workers = max(1, int(_w))
+        except ValueError:
+            print(f"\n[ERROR] --workers must be 'auto' or an integer (got {args.workers!r})", file=sys.stderr)
+            return 2
+
     exts = tuple(e for e in (args.extensions or "").replace(" ", ",").split(",") if e)
     cfg = BatchConfig(
         input_dir=args.input,
@@ -161,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit,
         max_size=args.max_size,
         model_max_size=(args.model_max_size or None),
+        workers=workers,
         jpeg_quality=args.jpeg_quality,
         threshold=args.threshold,
         dilation=args.dilation,
@@ -211,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
     print("\n=== ReflectMask for RealityScan — summary ===")
     print(f"  mode        : {summary.get('mode')}  (backend: {summary.get('backend')})")
     print(f"  device      : {summary.get('device')}  ({summary.get('device_note')})")
+    print(f"  workers     : {summary.get('workers')}")
     print(f"  candidates  : {summary.get('num_candidates')}")
     print(f"  processed   : {summary.get('processed_ok', 0)}")
     print(f"  skipped     : {summary.get('skipped', 0)}")

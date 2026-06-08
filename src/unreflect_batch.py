@@ -167,6 +167,10 @@ class BatchConfig:
     # native and the original copy stays native, so the RealityScan deliverable's resolution
     # is unchanged. 0/None disables; no effect in `clean` mode (where the image IS output).
     model_max_size: Optional[int] = 2048
+    # Parallel worker processes. The per-image pipeline is largely CPU/I-O bound and the
+    # GPU sits idle, so independent images parallelise well. None/0 = auto (from CPU cores,
+    # free VRAM for the AI backend, and the Windows 61-worker cap); 1 = sequential.
+    workers: Optional[int] = None
     jpeg_quality: int = 95
     threshold: float = 0.3
     dilation: int = 40
@@ -242,6 +246,7 @@ class BatchConfig:
             "mask_danger_pct": self.mask_danger_pct,
             "max_size": self.max_size,
             "model_max_size": self.model_max_size,
+            "workers": self.workers,
             "use_exiftool": self.use_exiftool,
         }
 
@@ -556,6 +561,81 @@ def _pkg_version() -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Parallelism                                                                   #
+# --------------------------------------------------------------------------- #
+# Windows ProcessPoolExecutor caps at 61 workers (WaitForMultipleObjects limit).
+_MAX_WORKERS_HARD = 61
+
+
+def _free_vram_gb(device: str) -> Optional[float]:
+    """Free VRAM in GB for the CUDA device, or None (CPU / unavailable)."""
+    if device != "cuda":
+        return None
+    try:
+        import torch
+
+        free, _total = torch.cuda.mem_get_info()
+        return free / 1e9
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# AI workers each reload the ~3.4 GB model (a contended startup "storm"). Measured on this
+# box: 4 workers x 60 imgs = ~2.4x; 16 workers x 24 imgs = ~0.36x (disaster). So amortise
+# the load (~24 img/worker was enough) and cap the worker count at the measured-safe 4.
+_AI_MIN_IMAGES_PER_WORKER = 24
+_AI_MAX_WORKERS = 4
+
+
+def resolve_workers(requested, n_images, backend, cores, free_vram_gb) -> int:
+    """Decide the worker-process count. ``requested`` None/0 = auto, else explicit.
+
+    Pure and injectable for testing. Always capped to <= cores, <= 61 (Windows) and
+    <= n_images. The luma backend has no model, so it parallelises freely up to the
+    disk-I/O knee. The AI backend is the catch: every worker reloads its own ~3.4 GB
+    checkpoint (a contended load storm), so a measured 24-image batch on 16 workers ran
+    ~3x SLOWER than sequential. Hence for the AI backend we cap by free VRAM, keep the
+    worker count modest, and only auto-parallelise batches big enough to amortise the
+    per-worker model load (so small AI batches stay sequential -- no regression).
+    """
+    if n_images <= 1:
+        return 1
+    hard = max(1, min(int(cores), _MAX_WORKERS_HARD, n_images))
+    if backend == "luma":
+        if requested and int(requested) > 0:
+            return min(int(requested), hard)
+        return min(hard, 24)  # past ~16-24 it is disk-I/O bound, not CPU
+    # AI backend: free-VRAM cap (~one model + headroom per worker) guards against OOM.
+    vram_cap = int(free_vram_gb / 4.5) if free_vram_gb else _AI_MAX_WORKERS
+    if requested and int(requested) > 0:
+        return max(1, min(int(requested), hard, vram_cap))  # respect user, but never OOM
+    amortised = n_images // _AI_MIN_IMAGES_PER_WORKER  # 0 for small batches -> sequential
+    return max(1, min(hard, vram_cap, _AI_MAX_WORKERS, amortised))
+
+
+# Per-worker state (each process loads its own model once, via the pool initializer).
+_WORKER: dict = {}
+
+
+def _worker_init(cfg: "BatchConfig", device: str, subdirs: dict, tmp_dir: str) -> None:
+    # Weights are local; never let a worker hang on a HuggingFace network probe.
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    _WORKER["cfg"] = cfg
+    _WORKER["device"] = device
+    _WORKER["subdirs"] = {k: Path(v) for k, v in subdirs.items()}
+    _WORKER["tmp_dir"] = Path(tmp_dir)
+    _WORKER["model"] = None if cfg.backend == "luma" else load_model(device)
+
+
+def _worker_task(arg):
+    idx, src_str = arg
+    rec = process_one(Path(src_str), _WORKER["cfg"], _WORKER["model"],
+                      _WORKER["device"], _WORKER["tmp_dir"], _WORKER["subdirs"])
+    return idx, rec
+
+
+# --------------------------------------------------------------------------- #
 # Batch driver                                                                  #
 # --------------------------------------------------------------------------- #
 def run_batch(
@@ -629,35 +709,61 @@ def run_batch(
         logger.finalize(summary)
         return summary
 
-    if model is None and not cfg.dry_run and cfg.backend != "luma":
-        ok, wdir, _ = weights_status()  # friendly, fast preflight before the slow load
+    # Decide parallelism. A caller-supplied model (the GUI's cached one) can't cross
+    # process boundaries, so reuse it sequentially; otherwise (CLI) fan out to worker
+    # processes that each load their own model.
+    if model is not None or cfg.dry_run:
+        workers = 1
+    else:
+        workers = resolve_workers(cfg.workers, len(images), cfg.backend,
+                                  os.cpu_count() or 4, _free_vram_gb(device))
+    summary["workers"] = workers
+
+    # Weights preflight (fast, friendly error) before the slow load / spawning N workers.
+    if not cfg.dry_run and cfg.backend != "luma" and model is None:
+        ok, wdir, _ = weights_status()
         if not ok:
             raise WeightsMissingError(weights_missing_message(wdir))
-        model = load_model(device)  # may raise WeightsMissingError / ModelLoadError
+        if workers == 1:
+            model = load_model(device)  # may raise WeightsMissingError / ModelLoadError
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="unreflect_", dir=str(cfg.output_dir / "logs")))
-    iterator = enumerate(images, start=1)
     bar = None
     if progress:
         try:
             from tqdm import tqdm
 
-            bar = tqdm(total=len(images), unit="img", desc=f"UnReflect[{device}]")
+            bar = tqdm(total=len(images), unit="img", desc=f"UnReflect[{device}x{workers}]")
         except Exception:  # noqa: BLE001
             bar = None
 
     rs_excluded: list[float] = []
+
+    def _handle(i: int, rec: dict) -> None:
+        logger.log(rec)
+        if "realityscan_excluded_pct" in rec:
+            rs_excluded.append(rec["realityscan_excluded_pct"])
+        if bar is not None:
+            bar.update(1)
+            bar.set_postfix_str(rec["status"])
+        if on_progress is not None:
+            on_progress(i, len(images), rec)
+
     try:
-        for i, src in iterator:
-            rec = process_one(src, cfg, model, device, tmp_dir, subdirs)
-            logger.log(rec)
-            if "realityscan_excluded_pct" in rec:
-                rs_excluded.append(rec["realityscan_excluded_pct"])
-            if bar is not None:
-                bar.update(1)
-                bar.set_postfix_str(rec["status"])
-            if on_progress is not None:
-                on_progress(i, len(images), rec)
+        if workers == 1:
+            for i, src in enumerate(images, start=1):
+                _handle(i, process_one(src, cfg, model, device, tmp_dir, subdirs))
+        else:
+            from concurrent.futures import ProcessPoolExecutor
+
+            sub_str = {k: str(v) for k, v in subdirs.items()}
+            tasks = [(i, str(s)) for i, s in enumerate(images, start=1)]
+            with ProcessPoolExecutor(
+                max_workers=workers, initializer=_worker_init,
+                initargs=(cfg, device, sub_str, str(tmp_dir)),
+            ) as ex:
+                for i, rec in ex.map(_worker_task, tasks):
+                    _handle(i, rec)
     finally:
         if bar is not None:
             bar.close()
