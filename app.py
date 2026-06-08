@@ -156,6 +156,13 @@ with st.sidebar:
     exts = st.multiselect("Extensions", list(SUPPORTED_EXTS), default=list(SUPPORTED_EXTS))
 
     with st.expander("Backend / detection (advanced)"):
+        model_max_size = st.number_input("Model input cap px (mask modes; 0 = full res)",
+                                         min_value=0, value=2048, step=256,
+                                         help="The model is ~448px internally; capping its "
+                                              "input avoids wasted full-res I/O (~5x faster on "
+                                              "50MP). Mask + original copy stay native, so the "
+                                              "RealityScan deliverable is unchanged. 0 = full "
+                                              "resolution (slow). No effect in Cleaned-export mode.")
         threshold = st.slider("Highlight threshold (model)", 0.0, 1.0, 0.3, 0.05)
         dilation = st.slider("Highlight mask dilation (px, model)", 0, 120, 40, 5)
         max_size = st.number_input("Quick mode: downscale longest side px (0 = off)",
@@ -211,6 +218,9 @@ if run:
         heatmap=False,
         limit=int(limit) or None,
         max_size=int(max_size) or None,
+        model_max_size=int(model_max_size) or None,
+        workers=1,  # GUI stays sequential (multiprocessing + Streamlit's spawn don't mix); use the CLI for parallel batches
+
         jpeg_quality=int(jpeg_quality),
         threshold=float(threshold),
         dilation=int(dilation),

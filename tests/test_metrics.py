@@ -85,3 +85,33 @@ def test_mask_overlay_tints_only_excluded():
     assert (out[:, 3:] == 100).all()          # kept region unchanged
     assert out[:, :3, 0].mean() > 100         # excluded tinted toward red (R up)
     assert out[:, :3, 1].mean() < 100         # G down
+
+
+def test_morph_to_mask_matches_reflection_exclusion_mask():
+    # Equivalence: candidate + morph_to_mask == the all-in-one mask (no downscale path).
+    before = _solid(255, (20, 20))
+    after = before.copy()
+    after[5:15, 5:15] = 100
+    direct = metrics.reflection_exclusion_mask(
+        before, after, drop_level=12, highlight_gate=200, dilation=2, open_radius=1)
+    cand = metrics.reflection_candidate_mask(before, after, drop_level=12, highlight_gate=200)
+    composed = metrics.morph_to_mask(cand, dilation=2, open_radius=1)
+    assert (direct == composed).all()
+
+
+def test_morph_to_mask_matches_luma_exclusion_mask():
+    img = np.zeros((16, 16, 3), dtype=np.uint8)
+    img[2:10, 2:10] = 255
+    direct = metrics.luma_exclusion_mask(img, level=200, dilation=2, open_radius=1)
+    cand = metrics.luma_candidate_mask(img, level=200)
+    composed = metrics.morph_to_mask(cand, dilation=2, open_radius=1)
+    assert (direct == composed).all()
+
+
+def test_morph_to_mask_polarity_and_stats():
+    cand = np.zeros((10, 10), dtype=np.uint8)
+    cand[:, :5] = 255  # left half candidate
+    m, st = metrics.morph_to_mask(cand, dilation=0, open_radius=0, return_stats=True)
+    assert int(m[:, :5].max()) == 0 and int(m[:, 5:].min()) == 255
+    assert abs(st["candidate_pixel_ratio"] - 50.0) < 1e-6
+    assert abs(st["final_mask_ratio"] - 50.0) < 1e-6

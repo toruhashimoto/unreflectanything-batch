@@ -161,6 +161,16 @@ class BatchConfig:
     emit_mask: bool = False
     limit: Optional[int] = None
     max_size: Optional[int] = None  # quick mode: downscale longest side (changes dims!)
+    # Mask-first speed: cap the MODEL's working resolution. The model is ~448px internally,
+    # so feeding it a 50MP photo is wasted decode/resize-back/encode I/O. Applies ONLY when
+    # no cleaned image is written (reflectmask/diagnostic) -- the mask is still upscaled to
+    # native and the original copy stays native, so the RealityScan deliverable's resolution
+    # is unchanged. 0/None disables; no effect in `clean` mode (where the image IS output).
+    model_max_size: Optional[int] = 2048
+    # Parallel worker processes. The per-image pipeline is largely CPU/I-O bound and the
+    # GPU sits idle, so independent images parallelise well. None/0 = auto (from CPU cores,
+    # free VRAM for the AI backend, and the Windows 61-worker cap); 1 = sequential.
+    workers: Optional[int] = None
     jpeg_quality: int = 95
     threshold: float = 0.3
     dilation: int = 40
@@ -235,6 +245,8 @@ class BatchConfig:
             "mask_warn_pct": self.mask_warn_pct,
             "mask_danger_pct": self.mask_danger_pct,
             "max_size": self.max_size,
+            "model_max_size": self.model_max_size,
+            "workers": self.workers,
             "use_exiftool": self.use_exiftool,
         }
 
@@ -381,11 +393,21 @@ def process_one(
             record["duration_sec"] = round(time.perf_counter() - t0, 4)
             return record
 
-        # Determine the actual input fed to the model (optionally downscaled).
+        # Determine the actual input fed to the model. The model works at ~448px
+        # internally, so for the mask-first modes (no cleaned image written) we cap the
+        # model input to model_max_size: the mask is upscaled back to native and the
+        # original copy stays native, so the RealityScan deliverable is unchanged, but the
+        # expensive full-res decode / resize-back / re-encode inside the model is avoided.
+        # In `clean` mode the cap is skipped (the image itself is the output); only the
+        # explicit --max-size quick mode applies there.
+        nw, nh = meta["size"]
+        cap = cfg.max_size
+        if not cfg.write_cleaned and cfg.model_max_size:
+            cap = cfg.model_max_size if not cap else min(cap, cfg.model_max_size)
         proc_input = src
-        if cfg.max_size:
+        if cap and max(nw, nh) > cap:
             small = image_io.load_rgb(src)
-            small.thumbnail((cfg.max_size, cfg.max_size), preview_mod._resampling())
+            small.thumbnail((cap, cap), preview_mod._resampling())
             proc_input = tmp_dir / (rel.as_posix().replace("/", "__") + ".in.png")
             proc_input.parent.mkdir(parents=True, exist_ok=True)
             small.save(proc_input, format="PNG")
@@ -465,26 +487,20 @@ def process_one(
         # side by side so RealityScan auto-attaches the mask layer on import.
         if cfg.realityscan:
             ow, oh = meta["size"]  # native original (w, h)
+            # Detect reflection candidates at the (possibly downscaled) model resolution...
             if luma_backend:
-                # Pure brightness gate on the original (rs_highlight_gate is the luma level).
-                rs_mask, mask_stats = metrics_mod.luma_exclusion_mask(
-                    before_arr,
-                    level=cfg.rs_highlight_gate,
-                    dilation=cfg.rs_dilation,
-                    open_radius=cfg.rs_open,
-                    return_stats=True,
-                )
+                cand = metrics_mod.luma_candidate_mask(before_arr, level=cfg.rs_highlight_gate)
             else:
-                rs_mask, mask_stats = metrics_mod.reflection_exclusion_mask(
-                    before_arr, after_arr,
-                    drop_level=cfg.rs_drop_level,
-                    highlight_gate=cfg.rs_highlight_gate,
-                    dilation=cfg.rs_dilation,
-                    open_radius=cfg.rs_open,
-                    return_stats=True,
-                )
-            # The mask is computed at the processed resolution; force it 1:1 with the
-            # native original (matters only in --max-size quick mode).
+                cand = metrics_mod.reflection_candidate_mask(
+                    before_arr, after_arr, cfg.rs_drop_level, cfg.rs_highlight_gate)
+            # ...then upscale the candidate to the NATIVE photo size (nearest = stays binary)
+            # and apply the morphology there, so rs_dilation / rs_open are exact native
+            # pixels and the mask is full-res, 1:1 with the photo, regardless of the cap.
+            if cand.shape[1] != ow or cand.shape[0] != oh:
+                cand = np.asarray(Image.fromarray(cand, "L").resize((ow, oh), Image.NEAREST))
+            rs_mask, mask_stats = metrics_mod.morph_to_mask(
+                cand, dilation=cfg.rs_dilation, open_radius=cfg.rs_open, return_stats=True)
+            # rs_mask is already native; save_mask_png's like_size is a no-op safety net.
             realityscan_mod.save_mask_png(rs_mask, rs_mask_dst, like_size=(ow, oh))
             record["realityscan_mask"] = str(rs_mask_dst)
             final_ratio = mask_stats["final_mask_ratio"]
@@ -502,17 +518,21 @@ def process_one(
 
             # Diagnostic mode: one 6-panel inspection sheet (original / cleaned / diff
             # heatmap / threshold candidate / final mask / overlay) into diagnostic/.
+            # Built at the model's working resolution so all panels are aligned (the saved
+            # mask above is the native-res deliverable; this is a downscaled preview).
             if cfg.mode == "diagnostic":
                 if luma_backend:
-                    cand = metrics_mod.luma_candidate_mask(before_arr, level=cfg.rs_highlight_gate)
+                    cand_d = metrics_mod.luma_candidate_mask(before_arr, level=cfg.rs_highlight_gate)
                 else:
-                    cand = metrics_mod.reflection_candidate_mask(
+                    cand_d = metrics_mod.reflection_candidate_mask(
                         before_arr, after_arr, cfg.rs_drop_level, cfg.rs_highlight_gate)
+                mask_proc = metrics_mod.morph_to_mask(
+                    cand_d, dilation=cfg.rs_dilation, open_radius=cfg.rs_open)
                 hm = metrics_mod.diff_heatmap(before_arr, after_arr)
-                overlay = metrics_mod.mask_overlay(before_arr, rs_mask)
+                overlay = metrics_mod.mask_overlay(before_arr, mask_proc)
                 diag = preview_mod.make_diagnostic(
                     before_pil, after_pil, Image.fromarray(hm, "RGB"),
-                    Image.fromarray(cand, "L"), Image.fromarray(rs_mask, "L"),
+                    Image.fromarray(cand_d, "L"), Image.fromarray(mask_proc, "L"),
                     Image.fromarray(overlay, "RGB"),
                 )
                 diag_path = subdirs["diagnostic"] / rel.with_suffix(".jpg")
@@ -538,6 +558,124 @@ def _pkg_version() -> str:
         return version("unreflectanything")
     except Exception:  # noqa: BLE001
         return "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# Parallelism                                                                   #
+# --------------------------------------------------------------------------- #
+# Windows ProcessPoolExecutor caps at 61 workers (WaitForMultipleObjects limit).
+_MAX_WORKERS_HARD = 61
+
+
+def _free_vram_gb(device: str) -> Optional[float]:
+    """Free VRAM in GB for the CUDA device, or None (CPU / unavailable)."""
+    if device != "cuda":
+        return None
+    try:
+        import torch
+
+        free, _total = torch.cuda.mem_get_info()
+        return free / 1e9
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _free_ram_gb() -> Optional[float]:
+    """Free system RAM in GB (psutil if present, else the Windows API), or None if unknown."""
+    try:
+        import psutil
+
+        return psutil.virtual_memory().available / 1e9
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # Windows fallback without psutil
+        import ctypes
+
+        class _MS(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        ms = _MS()
+        ms.dwLength = ctypes.sizeof(_MS)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+            return ms.ullAvailPhys / 1e9
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+# Generality: derive worker limits from MEASURED machine resources (cores, free VRAM, free
+# RAM) rather than magic numbers. The ceilings below are conservative *fallbacks*, not
+# machine-tuned optima -- the resource caps usually bind first, and --workers overrides all.
+_LUMA_WORKER_CEILING = 32        # luma I/O knee (measured ~13.8x at 32); cores/RAM usually bind
+_AI_WORKER_CEILING = 16          # safe once model loads are staggered (below); VRAM/cores bind
+_AI_MIN_IMAGES_PER_WORKER = 6    # auto: amortise the one-time per-worker model load
+_MODEL_VRAM_GB = 4.5             # ~one 3.4 GB checkpoint + activations, per AI worker
+_RAM_PER_WORKER_GB = 1.5         # decode buffers (+ host model copy for AI), per worker
+# Tier 2: cap how many workers load the model AT ONCE. 16 simultaneous loads thrashed
+# disk/CUDA (measured ~3x slower); staggering removes that machine-specific startup cliff so
+# the worker count can be chosen from steady-state resources alone.
+_MAX_CONCURRENT_MODEL_LOADS = 3
+
+
+def resolve_workers(requested, n_images, backend, cores, free_vram_gb, free_ram_gb) -> int:
+    """Decide the worker-process count from measured resources. Pure / injectable.
+
+    ``requested`` None/0 = auto, else explicit. These limits apply to BOTH auto and explicit
+    (so an explicit value can never OOM or oversubscribe): <= cores, <= 61 (Windows),
+    <= n_images, <= free_RAM / per-worker, and (AI) <= free_VRAM / per-model. Auto adds a
+    conservative throughput ceiling and, for the AI backend, requires enough images to
+    amortise the per-worker model load. The load *storm* is handled separately by staggering
+    (see _MAX_CONCURRENT_MODEL_LOADS), so these caps are about steady-state resources, not
+    the startup cliff -- which is why they can be resource-derived rather than hand-tuned.
+    """
+    if n_images <= 1:
+        return 1
+    ceilings = [max(1, min(int(cores), _MAX_WORKERS_HARD, n_images))]
+    if free_ram_gb:
+        ceilings.append(max(1, int(free_ram_gb / _RAM_PER_WORKER_GB)))
+    if backend != "luma":
+        ceilings.append(max(1, int(free_vram_gb / _MODEL_VRAM_GB)) if free_vram_gb
+                        else _AI_WORKER_CEILING)
+    if requested and int(requested) > 0:
+        return max(1, min(int(requested), *ceilings))
+    # auto: add the conservative throughput ceiling (+ AI load amortisation)
+    if backend == "luma":
+        ceilings.append(_LUMA_WORKER_CEILING)
+    else:
+        ceilings.append(_AI_WORKER_CEILING)
+        ceilings.append(max(1, n_images // _AI_MIN_IMAGES_PER_WORKER))
+    return max(1, min(ceilings))
+
+
+# Per-worker state (each process loads its own model once, via the pool initializer).
+_WORKER: dict = {}
+
+
+def _worker_init(cfg: "BatchConfig", device: str, subdirs: dict, tmp_dir: str, load_sem=None) -> None:
+    # Weights are local; never let a worker hang on a HuggingFace network probe.
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    _WORKER["cfg"] = cfg
+    _WORKER["device"] = device
+    _WORKER["subdirs"] = {k: Path(v) for k, v in subdirs.items()}
+    _WORKER["tmp_dir"] = Path(tmp_dir)
+    if cfg.backend == "luma":
+        _WORKER["model"] = None
+    elif load_sem is not None:
+        with load_sem:  # stagger: only _MAX_CONCURRENT_MODEL_LOADS workers load at once
+            _WORKER["model"] = load_model(device)
+    else:
+        _WORKER["model"] = load_model(device)
+
+
+def _worker_task(arg):
+    idx, src_str = arg
+    rec = process_one(Path(src_str), _WORKER["cfg"], _WORKER["model"],
+                      _WORKER["device"], _WORKER["tmp_dir"], _WORKER["subdirs"])
+    return idx, rec
 
 
 # --------------------------------------------------------------------------- #
@@ -614,35 +752,72 @@ def run_batch(
         logger.finalize(summary)
         return summary
 
-    if model is None and not cfg.dry_run and cfg.backend != "luma":
-        ok, wdir, _ = weights_status()  # friendly, fast preflight before the slow load
+    # Decide parallelism. A caller-supplied model (the GUI's cached one) can't cross
+    # process boundaries, so reuse it sequentially; otherwise (CLI) fan out to worker
+    # processes that each load their own model.
+    if model is not None or cfg.dry_run:
+        workers = 1
+    else:
+        workers = resolve_workers(cfg.workers, len(images), cfg.backend,
+                                  os.cpu_count() or 4, _free_vram_gb(device), _free_ram_gb())
+    summary["workers"] = workers
+
+    # Weights preflight (fast, friendly error) before the slow load / spawning N workers.
+    if not cfg.dry_run and cfg.backend != "luma" and model is None:
+        ok, wdir, _ = weights_status()
         if not ok:
             raise WeightsMissingError(weights_missing_message(wdir))
-        model = load_model(device)  # may raise WeightsMissingError / ModelLoadError
+        if workers == 1:
+            model = load_model(device)  # may raise WeightsMissingError / ModelLoadError
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="unreflect_", dir=str(cfg.output_dir / "logs")))
-    iterator = enumerate(images, start=1)
     bar = None
     if progress:
         try:
             from tqdm import tqdm
 
-            bar = tqdm(total=len(images), unit="img", desc=f"UnReflect[{device}]")
+            bar = tqdm(total=len(images), unit="img", desc=f"UnReflect[{device}x{workers}]")
         except Exception:  # noqa: BLE001
             bar = None
 
     rs_excluded: list[float] = []
+
+    def _handle(i: int, rec: dict) -> None:
+        logger.log(rec)
+        if "realityscan_excluded_pct" in rec:
+            rs_excluded.append(rec["realityscan_excluded_pct"])
+        if bar is not None:
+            bar.update(1)
+            bar.set_postfix_str(rec["status"])
+        if on_progress is not None:
+            on_progress(i, len(images), rec)
+
     try:
-        for i, src in iterator:
-            rec = process_one(src, cfg, model, device, tmp_dir, subdirs)
-            logger.log(rec)
-            if "realityscan_excluded_pct" in rec:
-                rs_excluded.append(rec["realityscan_excluded_pct"])
-            if bar is not None:
-                bar.update(1)
-                bar.set_postfix_str(rec["status"])
-            if on_progress is not None:
-                on_progress(i, len(images), rec)
+        if workers == 1:
+            for i, src in enumerate(images, start=1):
+                _handle(i, process_one(src, cfg, model, device, tmp_dir, subdirs))
+        else:
+            from concurrent.futures import ProcessPoolExecutor
+            import multiprocessing as mp
+
+            sub_str = {k: str(v) for k, v in subdirs.items()}
+            tasks = [(i, str(s)) for i, s in enumerate(images, start=1)]
+            # Tier 2: stagger model loads (AI only) via a cross-process semaphore so workers
+            # don't all read the 3.4 GB checkpoint at once -- removes the disk/CUDA load storm
+            # (the machine-specific cliff) regardless of how many workers we run.
+            manager = mp.Manager() if cfg.backend != "luma" else None
+            load_sem = (manager.Semaphore(min(workers, _MAX_CONCURRENT_MODEL_LOADS))
+                        if manager is not None else None)
+            try:
+                with ProcessPoolExecutor(
+                    max_workers=workers, initializer=_worker_init,
+                    initargs=(cfg, device, sub_str, str(tmp_dir), load_sem),
+                ) as ex:
+                    for i, rec in ex.map(_worker_task, tasks):
+                        _handle(i, rec)
+            finally:
+                if manager is not None:
+                    manager.shutdown()
     finally:
         if bar is not None:
             bar.close()

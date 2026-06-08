@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unreflectanything-batch"
-version = "0.2.0"
+version = "0.3.0"
 description = "ReflectMask for RealityScan - generate tight binary alignment masks that exclude specular reflections, protecting valid features for high-detail RealityScan/COLMAP photogrammetry. UnReflectAnything is the reflection-detection backend. (repo/package name kept: unreflectanything-batch)"
 readme = "README.md"
 requires-python = ">=3.11"

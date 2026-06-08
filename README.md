@@ -189,6 +189,8 @@ Full options (apply to every mode):
 | `--verbose` | off | Show the engine's own per-image output |
 | `--limit N` | — | **Test mode**: process only the first N images |
 | `--max-size PX` | — | **Quick mode**: downscale longest side before processing (⚠ changes output dims — not for COLMAP input) |
+| `--model-max-size PX` | `2048` | Mask modes: cap the model's working resolution (it's ~448 px internally, so feeding full 50 MP is wasted I/O). Mask + original copy stay **native**, so the RealityScan deliverable is unchanged; ~4× faster on 50 MP. `0` = full res. No effect in `clean` mode |
+| `--workers N` | `auto` | Parallel worker processes (`auto` / integer; `1` = sequential). The per-image work is CPU/I-O bound with the GPU mostly idle — the big throughput lever on a many-core box. `auto` is derived from your machine (CPU cores, free VRAM, free RAM), not hand-tuned constants; AI model loads are **staggered** (≤3 at once) so many workers never thrash disk/CUDA. Measured here: luma ~13×, AI ~2.5×. GUI runs sequential |
 | `--download-weights` | off | Download the ~5.9 GB weights first if missing, then run |
 | `--dry-run` | off | List what would be processed, run nothing |
 | `--no-progress` | off | Disable the progress bar |
