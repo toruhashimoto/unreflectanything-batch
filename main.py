@@ -120,6 +120,8 @@ def build_parser() -> argparse.ArgumentParser:
     # Test / quick modes.
     p.add_argument("--limit", type=int, default=None, metavar="N", help="test mode: process only the first N images")
     p.add_argument("--max-size", type=int, default=None, metavar="PX", help="quick mode: downscale longest side to PX before processing (CHANGES output dims — not for COLMAP input)")
+    p.add_argument("--model-max-size", type=int, default=2048, metavar="PX",
+                   help="mask-first modes: cap the MODEL's working resolution to PX (the model is ~448px internally; feeding full 50MP is wasted I/O). The mask is upscaled to native and the original copy stays native, so the RealityScan deliverable's resolution is UNCHANGED. 0 = feed full resolution (slow). No effect in 'clean' mode.")
     p.add_argument("--dry-run", action="store_true", help="list what would be processed without running the model")
     p.add_argument("--no-progress", action="store_true", help="disable the tqdm progress bar")
     return p
@@ -158,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         emit_mask=args.emit_mask,
         limit=args.limit,
         max_size=args.max_size,
+        model_max_size=(args.model_max_size or None),
         jpeg_quality=args.jpeg_quality,
         threshold=args.threshold,
         dilation=args.dilation,

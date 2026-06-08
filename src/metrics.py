@@ -317,3 +317,34 @@ def mask_overlay(
     tint = np.array(color, dtype=np.float32)
     out = np.where(excl, rgb * (1.0 - alpha) + tint * alpha, rgb)
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def morph_to_mask(
+    candidate: np.ndarray,
+    dilation: int = 2,
+    open_radius: int = 1,
+    return_stats: bool = False,
+):
+    """Open/dilate a 0/255 reflection ``candidate`` into the binary RealityScan
+    exclusion mask (``0`` = excluded, ``255`` = kept).
+
+    This is the morphology half of :func:`reflection_exclusion_mask`, split out so the
+    detector can run at a downscaled model resolution while the morphology is applied to
+    the candidate *after* it has been upscaled to the native photo size — keeping
+    ``open_radius`` / ``dilation`` as exact native pixels (and the mask 1:1 with the
+    photo) regardless of the model-input downscale. ``candidate`` at native resolution
+    with no downscale gives a result identical to ``reflection_exclusion_mask``.
+    """
+    cand = np.asarray(candidate)
+    if cand.ndim == 3:
+        cand = cand[..., 0]
+    bin01 = (cand > 0).astype(np.uint8)
+    candidate_ratio = float(bin01.mean()) * 100.0
+    refl = _morph_clean(bin01, open_radius, dilation)
+    mask = np.where(refl > 0, np.uint8(0), np.uint8(255))
+    if return_stats:
+        return mask, {
+            "candidate_pixel_ratio": round(candidate_ratio, 3),
+            "final_mask_ratio": round(float((mask == 0).mean()) * 100.0, 3),
+        }
+    return mask

@@ -161,6 +161,12 @@ class BatchConfig:
     emit_mask: bool = False
     limit: Optional[int] = None
     max_size: Optional[int] = None  # quick mode: downscale longest side (changes dims!)
+    # Mask-first speed: cap the MODEL's working resolution. The model is ~448px internally,
+    # so feeding it a 50MP photo is wasted decode/resize-back/encode I/O. Applies ONLY when
+    # no cleaned image is written (reflectmask/diagnostic) -- the mask is still upscaled to
+    # native and the original copy stays native, so the RealityScan deliverable's resolution
+    # is unchanged. 0/None disables; no effect in `clean` mode (where the image IS output).
+    model_max_size: Optional[int] = 2048
     jpeg_quality: int = 95
     threshold: float = 0.3
     dilation: int = 40
@@ -235,6 +241,7 @@ class BatchConfig:
             "mask_warn_pct": self.mask_warn_pct,
             "mask_danger_pct": self.mask_danger_pct,
             "max_size": self.max_size,
+            "model_max_size": self.model_max_size,
             "use_exiftool": self.use_exiftool,
         }
 
@@ -381,11 +388,21 @@ def process_one(
             record["duration_sec"] = round(time.perf_counter() - t0, 4)
             return record
 
-        # Determine the actual input fed to the model (optionally downscaled).
+        # Determine the actual input fed to the model. The model works at ~448px
+        # internally, so for the mask-first modes (no cleaned image written) we cap the
+        # model input to model_max_size: the mask is upscaled back to native and the
+        # original copy stays native, so the RealityScan deliverable is unchanged, but the
+        # expensive full-res decode / resize-back / re-encode inside the model is avoided.
+        # In `clean` mode the cap is skipped (the image itself is the output); only the
+        # explicit --max-size quick mode applies there.
+        nw, nh = meta["size"]
+        cap = cfg.max_size
+        if not cfg.write_cleaned and cfg.model_max_size:
+            cap = cfg.model_max_size if not cap else min(cap, cfg.model_max_size)
         proc_input = src
-        if cfg.max_size:
+        if cap and max(nw, nh) > cap:
             small = image_io.load_rgb(src)
-            small.thumbnail((cfg.max_size, cfg.max_size), preview_mod._resampling())
+            small.thumbnail((cap, cap), preview_mod._resampling())
             proc_input = tmp_dir / (rel.as_posix().replace("/", "__") + ".in.png")
             proc_input.parent.mkdir(parents=True, exist_ok=True)
             small.save(proc_input, format="PNG")
@@ -465,26 +482,20 @@ def process_one(
         # side by side so RealityScan auto-attaches the mask layer on import.
         if cfg.realityscan:
             ow, oh = meta["size"]  # native original (w, h)
+            # Detect reflection candidates at the (possibly downscaled) model resolution...
             if luma_backend:
-                # Pure brightness gate on the original (rs_highlight_gate is the luma level).
-                rs_mask, mask_stats = metrics_mod.luma_exclusion_mask(
-                    before_arr,
-                    level=cfg.rs_highlight_gate,
-                    dilation=cfg.rs_dilation,
-                    open_radius=cfg.rs_open,
-                    return_stats=True,
-                )
+                cand = metrics_mod.luma_candidate_mask(before_arr, level=cfg.rs_highlight_gate)
             else:
-                rs_mask, mask_stats = metrics_mod.reflection_exclusion_mask(
-                    before_arr, after_arr,
-                    drop_level=cfg.rs_drop_level,
-                    highlight_gate=cfg.rs_highlight_gate,
-                    dilation=cfg.rs_dilation,
-                    open_radius=cfg.rs_open,
-                    return_stats=True,
-                )
-            # The mask is computed at the processed resolution; force it 1:1 with the
-            # native original (matters only in --max-size quick mode).
+                cand = metrics_mod.reflection_candidate_mask(
+                    before_arr, after_arr, cfg.rs_drop_level, cfg.rs_highlight_gate)
+            # ...then upscale the candidate to the NATIVE photo size (nearest = stays binary)
+            # and apply the morphology there, so rs_dilation / rs_open are exact native
+            # pixels and the mask is full-res, 1:1 with the photo, regardless of the cap.
+            if cand.shape[1] != ow or cand.shape[0] != oh:
+                cand = np.asarray(Image.fromarray(cand, "L").resize((ow, oh), Image.NEAREST))
+            rs_mask, mask_stats = metrics_mod.morph_to_mask(
+                cand, dilation=cfg.rs_dilation, open_radius=cfg.rs_open, return_stats=True)
+            # rs_mask is already native; save_mask_png's like_size is a no-op safety net.
             realityscan_mod.save_mask_png(rs_mask, rs_mask_dst, like_size=(ow, oh))
             record["realityscan_mask"] = str(rs_mask_dst)
             final_ratio = mask_stats["final_mask_ratio"]
@@ -502,17 +513,21 @@ def process_one(
 
             # Diagnostic mode: one 6-panel inspection sheet (original / cleaned / diff
             # heatmap / threshold candidate / final mask / overlay) into diagnostic/.
+            # Built at the model's working resolution so all panels are aligned (the saved
+            # mask above is the native-res deliverable; this is a downscaled preview).
             if cfg.mode == "diagnostic":
                 if luma_backend:
-                    cand = metrics_mod.luma_candidate_mask(before_arr, level=cfg.rs_highlight_gate)
+                    cand_d = metrics_mod.luma_candidate_mask(before_arr, level=cfg.rs_highlight_gate)
                 else:
-                    cand = metrics_mod.reflection_candidate_mask(
+                    cand_d = metrics_mod.reflection_candidate_mask(
                         before_arr, after_arr, cfg.rs_drop_level, cfg.rs_highlight_gate)
+                mask_proc = metrics_mod.morph_to_mask(
+                    cand_d, dilation=cfg.rs_dilation, open_radius=cfg.rs_open)
                 hm = metrics_mod.diff_heatmap(before_arr, after_arr)
-                overlay = metrics_mod.mask_overlay(before_arr, rs_mask)
+                overlay = metrics_mod.mask_overlay(before_arr, mask_proc)
                 diag = preview_mod.make_diagnostic(
                     before_pil, after_pil, Image.fromarray(hm, "RGB"),
-                    Image.fromarray(cand, "L"), Image.fromarray(rs_mask, "L"),
+                    Image.fromarray(cand_d, "L"), Image.fromarray(mask_proc, "L"),
                     Image.fromarray(overlay, "RGB"),
                 )
                 diag_path = subdirs["diagnostic"] / rel.with_suffix(".jpg")

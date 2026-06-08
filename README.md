@@ -189,6 +189,7 @@ Full options (apply to every mode):
 | `--verbose` | off | Show the engine's own per-image output |
 | `--limit N` | — | **Test mode**: process only the first N images |
 | `--max-size PX` | — | **Quick mode**: downscale longest side before processing (⚠ changes output dims — not for COLMAP input) |
+| `--model-max-size PX` | `2048` | Mask modes: cap the model's working resolution (it's ~448 px internally, so feeding full 50 MP is wasted I/O). Mask + original copy stay **native**, so the RealityScan deliverable is unchanged; ~4× faster on 50 MP. `0` = full res. No effect in `clean` mode |
 | `--download-weights` | off | Download the ~5.9 GB weights first if missing, then run |
 | `--dry-run` | off | List what would be processed, run nothing |
 | `--no-progress` | off | Disable the progress bar |

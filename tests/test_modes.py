@@ -128,3 +128,8 @@ def test_config_has_default_mask_thresholds():
 def test_backend_defaults_to_unreflect():
     assert _cfg().backend == "unreflect"
     assert _cfg(backend="luma").backend == "luma"
+
+
+def test_config_model_max_size_default():
+    assert _cfg().model_max_size == 2048
+    assert _cfg(model_max_size=None).model_max_size is None
