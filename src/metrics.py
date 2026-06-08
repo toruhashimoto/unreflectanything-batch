@@ -165,6 +165,26 @@ def change_mask(
     return np.where(diff >= level, np.uint8(255), np.uint8(0))
 
 
+def _morph_clean(refl: np.ndarray, open_radius: int, dilation: int) -> np.ndarray:
+    """Despeckle (morphological open) then grow (dilate) a 0/1 uint8 mask.
+
+    Shared by the model-based and pure-luma exclusion masks. Best-effort: if OpenCV
+    is unavailable the (still valid) un-morphed binary mask is returned.
+    """
+    try:
+        import cv2
+
+        if open_radius and open_radius > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * open_radius + 1,) * 2)
+            refl = cv2.morphologyEx(refl, cv2.MORPH_OPEN, k)
+        if dilation and dilation > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilation + 1,) * 2)
+            refl = cv2.dilate(refl, k)
+    except Exception:  # noqa: BLE001 - morphology is best-effort; binary result still valid
+        pass
+    return refl
+
+
 def reflection_exclusion_mask(
     before: np.ndarray,
     after: np.ndarray,
@@ -172,7 +192,8 @@ def reflection_exclusion_mask(
     highlight_gate: float = 250.0,
     dilation: int = 2,
     open_radius: int = 1,
-) -> np.ndarray:
+    return_stats: bool = False,
+):
     """Binary (H, W) uint8 *exclusion* mask from a model before/after pair, in the
     polarity RealityScan / COLMAP expect: ``0`` (black) = **exclude** (a reflection
     the model removed), ``255`` (white) = **keep**.
@@ -193,6 +214,64 @@ def reflection_exclusion_mask(
     tiny specks (morphological open) and ``dilation`` grows the excluded region to
     cover reflection halos — keep both small (large values fragment SfM).
     """
+    cand = reflection_candidate_mask(before, after, drop_level, highlight_gate) > 0
+    candidate_ratio = float(cand.mean()) * 100.0  # candidate area BEFORE morphology
+
+    refl = _morph_clean(cand.astype(np.uint8), open_radius, dilation)
+    mask = np.where(refl > 0, np.uint8(0), np.uint8(255))  # reflection -> black (excluded)
+    if return_stats:
+        return mask, {
+            "candidate_pixel_ratio": round(candidate_ratio, 3),
+            "final_mask_ratio": round(float((mask == 0).mean()) * 100.0, 3),
+        }
+    return mask
+
+
+def luma_exclusion_mask(
+    rgb: np.ndarray,
+    level: float = 243.0,
+    dilation: int = 2,
+    open_radius: int = 1,
+    return_stats: bool = False,
+):
+    """Pure-luminance RealityScan exclusion mask — **no model, no GPU** (Backend B).
+
+    Marks pixels brighter than ``level`` (luma 0-255) as excluded reflection, in the
+    same polarity as :func:`reflection_exclusion_mask`: ``0`` (black) = **exclude**,
+    ``255`` (white) = **keep**. A fast, deterministic fallback for when the
+    UnReflectAnything weights / GPU aren't available, or as an A/B baseline.
+
+    Luma alone cannot tell a blown specular from a bright *diffuse* surface (sky, white
+    paint, light bodywork), so keep ``level`` HIGH (tight) to avoid masking those.
+    ``open_radius`` despeckles and ``dilation`` covers reflection halos — keep both small.
+    With ``return_stats`` returns ``(mask, stats)`` (candidate ratio before morphology,
+    final ratio after).
+    """
+    cand = luma_candidate_mask(rgb, level) > 0
+    candidate_ratio = float(cand.mean()) * 100.0
+
+    refl = _morph_clean(cand.astype(np.uint8), open_radius, dilation)
+    mask = np.where(refl > 0, np.uint8(0), np.uint8(255))  # bright reflection -> black (excluded)
+    if return_stats:
+        return mask, {
+            "candidate_pixel_ratio": round(candidate_ratio, 3),
+            "final_mask_ratio": round(float((mask == 0).mean()) * 100.0, 3),
+        }
+    return mask
+
+
+def reflection_candidate_mask(
+    before: np.ndarray,
+    after: np.ndarray,
+    drop_level: float = 12.0,
+    highlight_gate: float = 250.0,
+) -> np.ndarray:
+    """Pre-morphology reflection candidate as 0/255 uint8 (255 = candidate reflection).
+
+    This is exactly what :func:`reflection_exclusion_mask` gates on *before* the
+    morphological open/dilate; exposed so the diagnostic view can show what the
+    threshold selected, separately from the cleaned-up final mask.
+    """
     before = np.asarray(before)
     after = np.asarray(after)
     if before.shape != after.shape:
@@ -200,24 +279,41 @@ def reflection_exclusion_mask(
         w = min(before.shape[1], after.shape[1])
         before = before[:h, :w]
         after = after[:h, :w]
-
     lb = to_luma(before)
     la = to_luma(after)
-    refl = (lb - la) >= drop_level  # model darkened it -> probable removed highlight
+    refl = (lb - la) >= drop_level
     if highlight_gate and highlight_gate > 0:
         refl &= lb >= highlight_gate
-    refl = refl.astype(np.uint8)
+    return (refl.astype(np.uint8) * 255)
 
-    try:
-        import cv2
 
-        if open_radius and open_radius > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * open_radius + 1,) * 2)
-            refl = cv2.morphologyEx(refl, cv2.MORPH_OPEN, k)
-        if dilation and dilation > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilation + 1,) * 2)
-            refl = cv2.dilate(refl, k)
-    except Exception:  # noqa: BLE001 - morphology is best-effort; binary result still valid
-        pass
+def luma_candidate_mask(rgb: np.ndarray, level: float = 243.0) -> np.ndarray:
+    """Pre-morphology pure-luma candidate as 0/255 uint8 (255 = pixel brighter than ``level``)."""
+    return ((to_luma(np.asarray(rgb)) >= level).astype(np.uint8) * 255)
 
-    return np.where(refl > 0, np.uint8(0), np.uint8(255))  # reflection -> black (excluded)
+
+def mask_overlay(
+    rgb: np.ndarray,
+    exclusion_mask: np.ndarray,
+    color: tuple = (255, 0, 0),
+    alpha: float = 0.5,
+) -> np.ndarray:
+    """Tint the EXCLUDED region (``exclusion_mask == 0``) of an RGB image for the eye.
+
+    Returns a uint8 RGB copy where pixels the RealityScan mask excludes (black) are
+    blended toward ``color`` by ``alpha`` and kept pixels are unchanged — so you can
+    see exactly what alignment will ignore, overlaid on the photo.
+    """
+    rgb = np.asarray(rgb).astype(np.float32)
+    m = np.asarray(exclusion_mask)
+    if m.ndim == 3:
+        m = m[..., 0]
+    if m.shape != rgb.shape[:2]:
+        h = min(m.shape[0], rgb.shape[0])
+        w = min(m.shape[1], rgb.shape[1])
+        rgb = rgb[:h, :w]
+        m = m[:h, :w]
+    excl = (m == 0)[..., None]
+    tint = np.array(color, dtype=np.float32)
+    out = np.where(excl, rgb * (1.0 - alpha) + tint * alpha, rgb)
+    return np.clip(out, 0, 255).astype(np.uint8)

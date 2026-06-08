@@ -1,34 +1,44 @@
-# UnReflect Batch
+# ReflectMask for RealityScan
 
 [![CI](https://github.com/toruhashimoto/unreflectanything-batch/actions/workflows/ci.yml/badge.svg)](https://github.com/toruhashimoto/unreflectanything-batch/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Upstream: UnReflectAnything](https://img.shields.io/badge/upstream-UnReflectAnything-blue)](https://github.com/alberto-rota/UnReflectAnything)
-[![3DGS: LichtFeld Studio](https://img.shields.io/badge/3DGS-LichtFeld%20Studio-orange)](https://github.com/MrNeRF/LichtFeld-Studio)
+[![Backend: UnReflectAnything](https://img.shields.io/badge/backend-UnReflectAnything-blue)](https://github.com/alberto-rota/UnReflectAnything)
+[![For: RealityScan](https://img.shields.io/badge/for-RealityScan%202.x-orange)](https://www.realityscan.com/)
 
 **English** · [日本語 (Japanese)](README.ja.md)
 
-> **Independent wrapper.** This project is an independent batch wrapper for
-> [UnReflectAnything](https://github.com/alberto-rota/UnReflectAnything) — it is **not
-> affiliated with or endorsed by** the original authors, and bundles **none** of their
-> code (the model is installed from PyPI and called via its public API/CLI).
+> **Mask-first workflow for RealityScan.** *(The repository & Python package name remain
+> `unreflectanything-batch`.)* **ReflectMask** generates **tight binary alignment masks**
+> that exclude specular reflections / blown highlights from feature detection, so
+> RealityScan keeps its valid features and aligns more robustly for **high-detail
+> photogrammetry**. [UnReflectAnything](https://github.com/alberto-rota/UnReflectAnything)
+> is used only as the **reflection-detection backend** — this project is independent of,
+> and not endorsed by, its authors and bundles **none** of their code (installed from
+> PyPI, called via its public API).
 
-Batch-remove **specular reflections / blown-out highlights** from input photos using
-[**UnReflectAnything**](https://alberto-rota.github.io/UnReflectAnything/), as a
-**pre-processing step for 3D Gaussian Splatting (3DGS) and photogrammetry**
-(RealityScan, Postshot, Nerfstudio, COLMAP, …).
+**The goal is not to make photos look clean.** It is to remove the unstable,
+view-dependent feature points that specular reflection and blown highlights create — **while
+preserving as many valid features as possible** — so your RealityScan reconstruction comes
+out more detailed and more stable.
 
-It is a thin, safe **wrapper** around the `unreflectanything` package — it does not
-modify the research code. Originals are never touched; cleaned images plus
-before/after previews, diff heatmaps and per-image logs are written to a separate
-output folder, with **file names and sub-folder structure preserved** so the result
-drops straight into your existing SfM/3DGS pipeline.
+**Recommended output = your original images + one tight `‹name›.mask.png` per photo**
+(white = kept, black = excluded reflection). Originals are **never modified** and stay the
+primary input to RealityScan; only the unreliable reflection pixels are ignored during
+alignment. Reflection-*removed* (cleaned) images still exist, but are now **experimental /
+diagnostic only**.
 
-> ⚠️ **Evaluation-only.** Single-image reflection removal has **no multi-view
-> consistency guarantee** — the network can inpaint specular regions differently in
-> different views, which *can hurt* SfM feature matching. Treat the output as a tool
-> to **improve a problematic photo set for visualization/quality experiments**, not as
-> measurement ground truth. Always A/B test your reconstruction *with vs. without* the
-> cleaned images. See [Recommended workflow](#recommended-workflow-for-3dgs--photogrammetry).
+### Modes
+| Mode | Produces | Use it for |
+|---|---|---|
+| **`reflectmask`** (default) | original copy + `‹name›.mask.png` exclusion masks | **the recommended RealityScan alignment workflow** |
+| **`diagnostic`** | masks **+** before/after previews & diff heatmaps | inspecting what the backend flags before committing |
+| **`clean`** (experimental) | reflection-removed (cleaned) images | A/B experiments only — usually worse for alignment |
+
+> ⚠️ **Tight masks, not aggressive removal.** Over-masking excludes bright *diffuse*
+> surfaces (sky, white paint/bodywork), removing feature-rich regions and fragmenting the
+> reconstruction. Keep the gate tight — the run reports the average % of pixels excluded
+> and flags it above **5 % (warning) / 12 % (danger)**. If a set needs a large mask, it
+> probably reconstructs best from the **originals with no mask at all**. Always A/B test.
 
 ---
 
@@ -117,18 +127,35 @@ mid-run crash).
 ```powershell
 run_app.bat
 ```
-Pick an input and output folder, tweak options in the sidebar, press **Run batch**.
-You get live progress, a summary, and before/after samples. The GUI calls the exact
-same engine as the CLI.
+Pick a **mode** (default **ReflectMask**), set an input and output folder, tune the
+RealityScan-mask settings in the sidebar, and press **Run**. You get live progress, the
+average % of pixels excluded (with over-masking warnings), the RealityScan import steps,
+and sample masks. The GUI calls the exact same engine as the CLI.
 
 ## 5. Usage — CLI
 
-### Batch (the main tool)
+Three modes via an optional leading subcommand (default = `reflectmask`).
+
+### ReflectMask — generate RealityScan alignment masks (the main tool)
 ```powershell
-python main.py --input "D:\photo_input" --output "D:\photo_unreflect" --recursive --make-preview --device cuda
+python main.py reflectmask --input "D:\photo_input" --output "D:\rs_reflectmask" --recursive --device cuda
+```
+This writes `‹output›\realityscan\` — a byte-exact copy of each original + its
+`‹name›.mask.png` — ready to import into RealityScan. **No cleaned images are written.**
+The legacy flat form (`python main.py -i ... -o ...`, no subcommand) now runs ReflectMask
+too, and the old `--realityscan` flag is still accepted.
+
+**No GPU / no weights?** Add `--backend luma` for a pure-brightness mask (no model) —
+`--rs-gate` becomes the luma threshold (keep it high/tight). Same importable
+`realityscan/` folder; handy as a fast A/B baseline too.
+
+### Diagnostic preview / Cleaned export (experimental)
+```powershell
+python main.py diagnostic --input "D:\in" --output "D:\out" --recursive   # masks + previews + heatmaps
+python main.py clean      --input "D:\in" --output "D:\out" --recursive   # EXPERIMENTAL cleaned images
 ```
 
-Full options:
+Full options (apply to every mode):
 
 | Flag | Default | Description |
 |---|---|---|
@@ -136,6 +163,7 @@ Full options:
 | `--output, -o` | — | Output folder, **must be outside input** (**required**) |
 | `--recursive, -r` | off | Recurse into sub-folders (structure mirrored in output) |
 | `--device, -d` | `auto` | `auto` \| `cuda` \| `cpu` (auto = GPU if a *working* one is present) |
+| `--backend` | `unreflect` | Reflection-detection backend: `unreflect` (AI; needs GPU+weights) or `luma` (pure brightness gate; no model/GPU/weights, `--rs-gate` = luma level) |
 | `--extensions` | `.jpg,.jpeg,.png,.tif,.tiff` | Comma-separated extensions to process |
 | `--make-preview` | off | Side-by-side before/after into `preview_compare/` |
 | `--heatmap` | off | Per-image luma-difference heatmaps into `heatmap/` |
@@ -155,6 +183,8 @@ Full options:
 | `--rs-open` | `1` | RealityScan mask: remove specks smaller than this radius (morphological open) |
 | `--rs-masks-only` | off | RealityScan: write only the `.mask.png` files (don't copy the originals). The folder is then **not** directly importable — merge each mask into its photo's folder first |
 | `--rs-separator` | `.` | RealityScan mask name separator before `mask` (one of `. _ @ # !`) |
+| `--mask-warn` | `5.0` | Warn when the average % of pixels excluded by the masks exceeds this |
+| `--mask-danger` | `12.0` | Flag DANGER (likely over-masking valid features) when the average % excluded exceeds this |
 | `--exiftool` | off | Copy **all** metadata via exiftool when available (maker notes/GPS/XMP, all formats; slower, per-file). Default = fast piexif/PIL EXIF |
 | `--verbose` | off | Show the engine's own per-image output |
 | `--limit N` | — | **Test mode**: process only the first N images |
@@ -174,13 +204,14 @@ Full options:
 
 ```
 <output>/
-├── <original tree, original filenames>   # cleaned images (format/size/EXIF preserved)
+├── <original tree, original filenames>   # cleaned images — `clean` mode only (format/size/EXIF preserved)
 │   ├── img001.jpg
 │   └── day2/img777.png
 ├── preview_compare/                      # [Original | UnReflect | (Diff)] strips  (--make-preview)
 ├── heatmap/                              # luma-difference heatmaps               (--heatmap)
 ├── masks/                                # changed-region masks                   (--emit-mask)
-├── realityscan/                          # original copies + ‹name›.mask.png      (--realityscan)
+├── realityscan/                          # original copies + ‹name›.mask.png      (reflectmask / diagnostic)
+├── diagnostic/                           # 6-panel inspection sheets             (diagnostic mode)
 └── logs/
     ├── process_log.jsonl                 # one detailed JSON record per image
     ├── process_log.csv                   # flat summary table
@@ -320,6 +351,17 @@ flag, an environment variable, or `PATH` — nothing is hard-coded.
 - [COLMAP](https://github.com/colmap/colmap/releases) — `--colmap` or `$COLMAP_EXE`
 - [LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio) (for the 3DGS harness) — `--lichtfeld` or `$LICHTFELD_EXE`
 
+### One command — build all four variant sets — `tools/make_ab_sets.py`
+Builds `original` / `reflectmask` / `luma` / `cleaned` in one workspace with a stats
+report and the exact import folder per set. The model loads once for the two AI sets, and
+they are skipped (so it runs with **no GPU/weights**) with `--skip-model` or when the
+weights aren't present:
+```powershell
+python tools\make_ab_sets.py -i "D:\photo_input" -o "D:\ab_work" --recursive
+```
+Then import each set into RealityScan (masked sets = the `realityscan/` sub-folder), align,
+and compare registered images / detail. See `‹work›\ab_sets_report.md`.
+
 ### SfM A/B — `tools/ab_colmap.py`
 Runs a COLMAP sparse reconstruction on each image set and reports registered images,
 3D points, track length and reprojection error.
@@ -403,6 +445,7 @@ UnReflectAnything/
 │   ├── logger.py           # JSONL / CSV / errors / summary
 │   └── unreflect_batch.py  # engine: device select, model load, per-image pipeline
 ├── tools/
+│   ├── make_ab_sets.py     # build original/reflectmask/luma/cleaned variant sets + A/B report
 │   ├── ab_colmap.py        # A/B COLMAP sparse-reconstruction comparison (original vs cleaned)
 │   ├── ab_3dgs.py          # A/B 3D Gaussian Splatting comparison (COLMAP -> LichtFeld -> figures)
 │   ├── make_colmap_masks.py       # luma-gated COLMAP exclusion masks (no model)

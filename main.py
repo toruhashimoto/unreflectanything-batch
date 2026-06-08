@@ -31,15 +31,32 @@ if str(ROOT) not in sys.path:
 from src.image_io import SUPPORTED_EXTS  # noqa: E402
 
 
+class _Fmt(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    """Show option defaults AND keep the raw (multi-line) epilog formatting."""
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="unreflect-batch",
+        prog="reflectmask",
         description=(
-            "Batch-remove specular reflections / highlights from photos using "
-            "UnReflectAnything, as an evaluation pre-process for 3D Gaussian "
-            "Splatting / photogrammetry. Originals are never modified."
+            "ReflectMask for RealityScan — generate tight binary alignment masks that "
+            "exclude specular reflections / blown highlights from RealityScan feature "
+            "detection, protecting valid features for high-detail photogrammetry. "
+            "UnReflectAnything is used as the reflection-detection backend. Originals "
+            "are never modified."
         ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog=(
+            "modes (optional leading subcommand; default = reflectmask):\n"
+            "  reflectmask  original images + <name>.mask.png exclusion masks  (DEFAULT, primary)\n"
+            "  diagnostic   reflectmask + before/after previews & diff heatmaps for inspection\n"
+            "  clean        EXPERIMENTAL: export reflection-removed (cleaned) images instead\n"
+            "\n"
+            "examples:\n"
+            "  python main.py reflectmask -i \"D:\\photo_input\" -o \"D:\\rs_reflectmask\" -r\n"
+            "  python main.py -i \"D:\\in\" -o \"D:\\out\" -r          (flat form = reflectmask)\n"
+            "  python main.py clean -i \"D:\\in\" -o \"D:\\out\" -r      (cleaned images, experimental)\n"
+        ),
+        formatter_class=_Fmt,
     )
     p.add_argument("--input", "-i", required=True, type=Path, help="input image folder")
     p.add_argument("--output", "-o", required=True, type=Path, help="output folder (must be OUTSIDE input)")
@@ -47,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--device", "-d", choices=["auto", "cuda", "cpu"], default="auto",
         help="auto = use CUDA if a working GPU is present, else CPU",
+    )
+    p.add_argument(
+        "--backend", choices=["unreflect", "luma"], default="unreflect",
+        help="reflection-detection backend: 'unreflect' (AI; needs GPU + weights) or "
+             "'luma' (pure brightness gate; no model/GPU/weights, --rs-gate is the luma level)",
     )
     p.add_argument(
         "--extensions", default=",".join(SUPPORTED_EXTS),
@@ -73,6 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="RealityScan mask: remove specks smaller than this radius (morphological open)")
     p.add_argument("--rs-separator", default=".", choices=[".", "_", "@", "#", "!"],
                    help="RealityScan mask name separator before 'mask' (e.g. '.' -> name.ext.mask.png)")
+    p.add_argument("--mask-warn", type=float, default=5.0,
+                   help="warn when the average %% of pixels excluded by the masks exceeds this")
+    p.add_argument("--mask-danger", type=float, default=12.0,
+                   help="flag DANGER (likely over-masking valid features) when the average %% excluded exceeds this")
 
     # Safety / behaviour.
     p.add_argument("--overwrite", action="store_true", help="overwrite existing outputs (default: skip)")
@@ -100,13 +126,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
 
-    # Import the engine lazily so --help works even before torch is installed.
+    # Import the engine lazily so --help works before torch is installed (importing the
+    # engine pulls numpy/PIL but NOT torch — that import stays lazy inside the engine).
     from src.unreflect_batch import (
         BatchConfig, run_batch, WeightsMissingError, ModelLoadError,
-        weights_status, download_weights,
+        weights_status, download_weights, MODES, DEFAULT_MODE,
     )
+
+    # An optional leading subcommand selects the product mode (default = reflectmask).
+    # The legacy flat form and the back-compat `--realityscan` flag still parse as before.
+    # The mode's mask-first defaults are resolved inside BatchConfig.__post_init__.
+    mode = DEFAULT_MODE
+    if raw and raw[0] in MODES:
+        mode = raw.pop(0)
+    args = build_parser().parse_args(raw)
 
     exts = tuple(e for e in (args.extensions or "").replace(" ", ",").split(",") if e)
     cfg = BatchConfig(
@@ -115,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
         recursive=args.recursive,
         exts=exts,
         device=args.device,
+        mode=mode,
+        backend=args.backend,
         overwrite=args.overwrite,
         make_preview=args.make_preview,
         heatmap=args.heatmap,
@@ -137,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
         rs_highlight_gate=args.rs_gate,
         rs_dilation=args.rs_dilation,
         rs_open=args.rs_open,
+        mask_warn_pct=args.mask_warn,
+        mask_danger_pct=args.mask_danger,
         use_exiftool=args.exiftool,
         verbose=args.verbose,
         dry_run=args.dry_run,
@@ -166,7 +205,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\n[ABORTED] interrupted by user (partial logs were written).", file=sys.stderr)
         return 130
 
-    print("\n=== UnReflect Batch summary ===")
+    print("\n=== ReflectMask for RealityScan — summary ===")
+    print(f"  mode        : {summary.get('mode')}  (backend: {summary.get('backend')})")
     print(f"  device      : {summary.get('device')}  ({summary.get('device_note')})")
     print(f"  candidates  : {summary.get('num_candidates')}")
     print(f"  processed   : {summary.get('processed_ok', 0)}")
@@ -183,13 +223,18 @@ def main(argv: list[str] | None = None) -> int:
                   f"({summary.get('realityscan_warning', '')})")
         else:
             print(f"  RealityScan : {rs_dir}  ({n_masks} masks, avg {mean_excl:.2f}% excluded)")
+            warn_n = summary.get('realityscan_warn_images', 0)
+            danger_n = summary.get('realityscan_danger_images', 0)
+            if warn_n or danger_n:
+                print(f"     mask-area  : {warn_n} warning (> {cfg.mask_warn_pct:.0f}%), "
+                      f"{danger_n} danger (> {cfg.mask_danger_pct:.0f}%) of {n_masks} images")
             if cfg.rs_copy_originals:
                 print("     -> import this folder into RealityScan (photos + masks together),")
                 print("        then enable 'masks for alignment' in Selected Input > Image Layers.")
             else:
                 print("     -> masks-only: place each .mask.png next to its image (same folder),")
                 print("        import together, then enable 'masks for alignment'.")
-            if mean_excl is not None and mean_excl > 12:
+            if mean_excl is not None and mean_excl > cfg.mask_danger_pct:
                 print(f"     [!] excluding {mean_excl:.1f}% of pixels on average -- likely over-masking "
                       "diffuse-bright areas, not just reflections.")
                 print("         Raise --rs-gate (e.g. 252), or this set may simply not need masking "

@@ -25,17 +25,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import cv2
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import realityscan  # noqa: E402
+from src import realityscan, metrics  # noqa: E402
 
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
-_LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
 def main(argv=None) -> int:
@@ -68,17 +66,13 @@ def main(argv=None) -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     excl = []
     for p in imgs:
-        rgb = np.asarray(Image.open(p).convert("RGB"), dtype=np.float32)
-        luma = rgb @ _LUMA
-        refl = (luma >= args.level).astype(np.uint8)
-        if args.open_radius > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * args.open_radius + 1,) * 2)
-            refl = cv2.morphologyEx(refl, cv2.MORPH_OPEN, k)
-        if args.dilation > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * args.dilation + 1,) * 2)
-            refl = cv2.dilate(refl, k)
-        mask = np.where(refl > 0, np.uint8(0), np.uint8(255))  # 0 = excluded reflection
-        excl.append(float((mask == 0).mean()) * 100)
+        rgb = np.asarray(Image.open(p).convert("RGB"))
+        # Same pure-luma exclusion mask the GUI/CLI use with --backend luma.
+        mask, stats = metrics.luma_exclusion_mask(
+            rgb, level=args.level, dilation=args.dilation,
+            open_radius=args.open_radius, return_stats=True,
+        )
+        excl.append(stats["final_mask_ratio"])
 
         rel = p.relative_to(args.input)
         mask_dst = args.output / rel.parent / realityscan.mask_filename(p.name, args.separator)

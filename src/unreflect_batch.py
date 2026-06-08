@@ -35,6 +35,60 @@ from .logger import RunLogger, PROCESSED_BY
 
 MODEL_NAME = "UnReflectAnything"
 
+# Top-level application modes (v0.2: ReflectMask — the RealityScan alignment mask —
+# is the primary product; cleaned-image export is the experimental `clean` mode).
+MODES = ("reflectmask", "diagnostic", "clean")
+DEFAULT_MODE = "reflectmask"
+
+
+def resolve_mode_defaults(mode: str) -> dict:
+    """Map a top-level mode to the BatchConfig fields it implies.
+
+    ReflectMask (default) and Diagnostic are *mask-first*: the deliverable is the
+    RealityScan exclusion mask (plus a byte-exact copy of the untouched original),
+    and the cleaned image is NOT written. Cleaned-image export is the experimental
+    ``clean`` mode. Explicit CLI/GUI flags may still turn extra artifacts on.
+    """
+    mode = (mode or DEFAULT_MODE).lower()
+    if mode == "clean":
+        return {"realityscan": False, "write_cleaned": True,
+                "rs_copy_originals": True, "make_preview": False, "heatmap": False}
+    if mode == "diagnostic":
+        return {"realityscan": True, "write_cleaned": False,
+                "rs_copy_originals": True, "make_preview": True, "heatmap": True}
+    # reflectmask (default)
+    return {"realityscan": True, "write_cleaned": False,
+            "rs_copy_originals": True, "make_preview": False, "heatmap": False}
+
+
+def pending_outputs(write_cleaned: bool, realityscan: bool, dst: Path,
+                    rs_mask_dst: Optional[Path]) -> list:
+    """The deliverables that must already exist for an image to count as 'done'.
+
+    Mode-aware so the no-overwrite skip logic keys off the *primary* output: the
+    cleaned image in ``clean`` mode, the RealityScan mask in the mask-first modes
+    (and both when a clean run also emits masks).
+    """
+    outs = []
+    if write_cleaned:
+        outs.append(dst)
+    if realityscan and rs_mask_dst is not None:
+        outs.append(rs_mask_dst)
+    return outs or [dst]
+
+
+def mask_ratio_warning_level(pct: float, warn: float = 5.0, danger: float = 12.0) -> str:
+    """Classify an excluded-pixel percentage: ``'ok' | 'warning' | 'danger'``.
+
+    Over-masking removes valid features and hurts high-detail RealityScan alignment,
+    so a large excluded area is a danger signal, not a success.
+    """
+    if pct > danger:
+        return "danger"
+    if pct > warn:
+        return "warning"
+    return "ok"
+
 
 class WeightsMissingError(RuntimeError):
     """Raised when the pretrained weights have not been downloaded yet."""
@@ -96,6 +150,11 @@ class BatchConfig:
     recursive: bool = False
     exts: tuple[str, ...] = image_io.SUPPORTED_EXTS
     device: str = "auto"  # auto | cuda | cpu
+    mode: str = DEFAULT_MODE  # reflectmask | diagnostic | clean (top-level product mode)
+    backend: str = "unreflect"  # reflection-candidate backend: unreflect (A) | luma (B, later)
+    # None -> derived from mode in __post_init__ (clean=True, else False). The mask-first
+    # modes never write the cleaned image; the deliverable is the RealityScan mask.
+    write_cleaned: Optional[bool] = None
     overwrite: bool = False
     make_preview: bool = False
     heatmap: bool = False
@@ -125,6 +184,11 @@ class BatchConfig:
     rs_highlight_gate: float = 250.0 # only mask pixels whose original luma was >= this (0 = off; tight by default so diffuse-bright surfaces aren't excluded)
     rs_dilation: int = 2             # grow the excluded region by N px (cover halos; keep small)
     rs_open: int = 1                 # remove specks smaller than this radius (morphological open)
+    # Mask-area-ratio warning thresholds (% of pixels excluded). Over-masking removes
+    # valid features and hurts high-detail alignment, so a large excluded area is a
+    # danger signal, not a success.
+    mask_warn_pct: float = 5.0
+    mask_danger_pct: float = 12.0
     use_exiftool: bool = False  # full metadata copy via exiftool (if available)
     verbose: bool = False  # let the engine's own stdout through
     highlight_level: float = metrics_mod.DEFAULT_HIGHLIGHT_LEVEL
@@ -134,9 +198,25 @@ class BatchConfig:
         self.input_dir = Path(self.input_dir)
         self.output_dir = Path(self.output_dir)
         self.exts = image_io.normalize_exts(self.exts)
+        # Resolve the product mode's implied defaults so a BatchConfig built with just
+        # mode="reflectmask" is self-consistent (mask-first: emit the mask, no cleaned
+        # image) whether it comes from the CLI, the GUI, or a direct caller. Explicit
+        # values are only ever turned ON by the mode, never off.
+        md = resolve_mode_defaults(self.mode)
+        if self.write_cleaned is None:
+            self.write_cleaned = md["write_cleaned"]
+        if md["realityscan"]:
+            self.realityscan = True
+        if md["make_preview"]:
+            self.make_preview = True
+        if md["heatmap"]:
+            self.heatmap = True
 
     def params_dict(self) -> dict:
         return {
+            "mode": self.mode,
+            "backend": self.backend,
+            "write_cleaned": self.write_cleaned,
             "threshold": self.threshold,
             "dilation": self.dilation,
             "batch_size": self.batch_size,
@@ -152,6 +232,8 @@ class BatchConfig:
             "rs_highlight_gate": self.rs_highlight_gate,
             "rs_dilation": self.rs_dilation,
             "rs_open": self.rs_open,
+            "mask_warn_pct": self.mask_warn_pct,
+            "mask_danger_pct": self.mask_danger_pct,
             "max_size": self.max_size,
             "use_exiftool": self.use_exiftool,
         }
@@ -265,14 +347,16 @@ def process_one(
         subdirs["realityscan"] / rel.parent / realityscan_mod.mask_filename(src.name, cfg.rs_separator)
         if cfg.realityscan else None
     )
+    luma_backend = (cfg.backend == "luma")
     record: dict = {
         "status": "ok",
-        "processed_by": PROCESSED_BY,
+        "processed_by": "luma-gate" if luma_backend else PROCESSED_BY,
         "source": str(src),
         "output": str(dst),
-        "model": MODEL_NAME,
-        "model_version": _pkg_version(),
+        "model": "pure-luma" if luma_backend else MODEL_NAME,
+        "model_version": "n/a" if luma_backend else _pkg_version(),
         "device": device,
+        "backend": cfg.backend,
         "params": cfg.params_dict(),
     }
 
@@ -280,14 +364,12 @@ def process_one(
         meta = image_io.read_metadata(src)
         record["input_size"] = list(meta["size"])  # (w, h)
 
-        # No-overwrite default. The cleaned image is the primary output, but a
-        # RealityScan mask is a separately-requested deliverable: if it's still missing
-        # we must run (inference is required to build it) even when the cleaned image
-        # already exists — otherwise re-running with --realityscan would silently
-        # produce nothing. We just keep the existing cleaned image in that case.
-        cleaned_exists = dst.exists()
-        rs_pending = rs_mask_dst is not None and not rs_mask_dst.exists()
-        if cleaned_exists and not cfg.overwrite and not rs_pending:
+        # No-overwrite default, mode-aware: skip only when EVERY requested deliverable
+        # for this image already exists (the cleaned image in `clean` mode, the
+        # RealityScan mask in the mask-first modes, or both). Inference still runs when
+        # any required output is missing, since the mask is derived from it.
+        required = pending_outputs(cfg.write_cleaned, cfg.realityscan, dst, rs_mask_dst)
+        if all(p.exists() for p in required) and not cfg.overwrite:
             record["status"] = "skipped"
             record["error"] = "output exists (use --overwrite to replace)"
             record["duration_sec"] = round(time.perf_counter() - t0, 4)
@@ -310,22 +392,27 @@ def process_one(
 
         before_pil = image_io.load_rgb(proc_input)
 
-        # Run the model -> lossless temp PNG (avoids a double JPEG encode).
-        tmp_out = tmp_dir / (rel.as_posix().replace("/", "__") + ".out.png")
-        tmp_out.parent.mkdir(parents=True, exist_ok=True)
-        _run_inference_to_file(model, proc_input, tmp_out, cfg)
-        after_pil = image_io.load_rgb(tmp_out)
+        if luma_backend:
+            # Backend B: no model. The image is not modified; the exclusion mask is
+            # derived from a pure brightness gate on the original (below).
+            after_pil = before_pil
+        else:
+            # Run the model -> lossless temp PNG (avoids a double JPEG encode).
+            tmp_out = tmp_dir / (rel.as_posix().replace("/", "__") + ".out.png")
+            tmp_out.parent.mkdir(parents=True, exist_ok=True)
+            _run_inference_to_file(model, proc_input, tmp_out, cfg)
+            after_pil = image_io.load_rgb(tmp_out)
 
-        # Full-res highlight-gated composite: keep original detail everywhere
-        # except blown highlights (preserves SfM features on high-res inputs).
-        if cfg.mask_composite:
-            comp = metrics_mod.luminance_composite(
-                np.asarray(before_pil), np.asarray(after_pil),
-                level=cfg.mask_composite_level,
-                dilation=cfg.mask_composite_dilation,
-                feather=cfg.mask_composite_feather,
-            )
-            after_pil = Image.fromarray(comp, "RGB")
+            # Full-res highlight-gated composite: keep original detail everywhere
+            # except blown highlights (preserves SfM features on high-res inputs).
+            if cfg.mask_composite:
+                comp = metrics_mod.luminance_composite(
+                    np.asarray(before_pil), np.asarray(after_pil),
+                    level=cfg.mask_composite_level,
+                    dilation=cfg.mask_composite_dilation,
+                    feather=cfg.mask_composite_feather,
+                )
+                after_pil = Image.fromarray(comp, "RGB")
 
         before_arr = np.asarray(before_pil)
         after_arr = np.asarray(after_pil)
@@ -334,14 +421,19 @@ def process_one(
             before_arr, after_arr, cfg.highlight_level
         )
 
-        # Save the cleaned image (format/EXIF/ICC preserved from the original src).
-        # If it already exists and we only ran to (re)build a RealityScan mask, keep it.
-        if cleaned_exists and not cfg.overwrite:
-            record["note"] = "cleaned output already existed and was kept; ran for RealityScan mask only"
+        # Cleaned image: only written in cleaned-export (`clean`) mode. The mask-first
+        # modes (reflectmask/diagnostic) keep the originals untouched and emit the
+        # RealityScan mask as the deliverable, so no cleaned image is produced here.
+        if cfg.write_cleaned:
+            if dst.exists() and not cfg.overwrite:
+                record["note"] = "cleaned output already existed and was kept"
+            else:
+                image_io.save_processed(
+                    src, after_pil, dst, jpeg_quality=cfg.jpeg_quality, use_exiftool=cfg.use_exiftool
+                )
+            record["output"] = str(dst)
         else:
-            image_io.save_processed(
-                src, after_pil, dst, jpeg_quality=cfg.jpeg_quality, use_exiftool=cfg.use_exiftool
-            )
+            record["output"] = str(rs_mask_dst) if rs_mask_dst is not None else str(dst)
 
         # Optional artifacts.
         if cfg.heatmap or cfg.make_preview:
@@ -373,22 +465,60 @@ def process_one(
         # side by side so RealityScan auto-attaches the mask layer on import.
         if cfg.realityscan:
             ow, oh = meta["size"]  # native original (w, h)
-            rs_mask = metrics_mod.reflection_exclusion_mask(
-                before_arr, after_arr,
-                drop_level=cfg.rs_drop_level,
-                highlight_gate=cfg.rs_highlight_gate,
-                dilation=cfg.rs_dilation,
-                open_radius=cfg.rs_open,
-            )
+            if luma_backend:
+                # Pure brightness gate on the original (rs_highlight_gate is the luma level).
+                rs_mask, mask_stats = metrics_mod.luma_exclusion_mask(
+                    before_arr,
+                    level=cfg.rs_highlight_gate,
+                    dilation=cfg.rs_dilation,
+                    open_radius=cfg.rs_open,
+                    return_stats=True,
+                )
+            else:
+                rs_mask, mask_stats = metrics_mod.reflection_exclusion_mask(
+                    before_arr, after_arr,
+                    drop_level=cfg.rs_drop_level,
+                    highlight_gate=cfg.rs_highlight_gate,
+                    dilation=cfg.rs_dilation,
+                    open_radius=cfg.rs_open,
+                    return_stats=True,
+                )
             # The mask is computed at the processed resolution; force it 1:1 with the
             # native original (matters only in --max-size quick mode).
             realityscan_mod.save_mask_png(rs_mask, rs_mask_dst, like_size=(ow, oh))
             record["realityscan_mask"] = str(rs_mask_dst)
-            record["realityscan_excluded_pct"] = round(float((rs_mask == 0).mean()) * 100.0, 3)
+            final_ratio = mask_stats["final_mask_ratio"]
+            record["candidate_pixel_ratio"] = mask_stats["candidate_pixel_ratio"]
+            record["final_mask_ratio"] = final_ratio
+            record["realityscan_excluded_pct"] = final_ratio
+            record["mask_ratio"] = final_ratio  # alias: % of pixels excluded from alignment
+            record["mask_ratio_level"] = mask_ratio_warning_level(
+                final_ratio, cfg.mask_warn_pct, cfg.mask_danger_pct
+            )
             if cfg.rs_copy_originals:
                 img_dst = subdirs["realityscan"] / rel
                 realityscan_mod.copy_source_image(src, img_dst)
                 record["realityscan_image"] = str(img_dst)
+
+            # Diagnostic mode: one 6-panel inspection sheet (original / cleaned / diff
+            # heatmap / threshold candidate / final mask / overlay) into diagnostic/.
+            if cfg.mode == "diagnostic":
+                if luma_backend:
+                    cand = metrics_mod.luma_candidate_mask(before_arr, level=cfg.rs_highlight_gate)
+                else:
+                    cand = metrics_mod.reflection_candidate_mask(
+                        before_arr, after_arr, cfg.rs_drop_level, cfg.rs_highlight_gate)
+                hm = metrics_mod.diff_heatmap(before_arr, after_arr)
+                overlay = metrics_mod.mask_overlay(before_arr, rs_mask)
+                diag = preview_mod.make_diagnostic(
+                    before_pil, after_pil, Image.fromarray(hm, "RGB"),
+                    Image.fromarray(cand, "L"), Image.fromarray(rs_mask, "L"),
+                    Image.fromarray(overlay, "RGB"),
+                )
+                diag_path = subdirs["diagnostic"] / rel.with_suffix(".jpg")
+                diag_path.parent.mkdir(parents=True, exist_ok=True)
+                diag.save(diag_path, format="JPEG", quality=90)
+                record["diagnostic"] = str(diag_path)
 
         record["duration_sec"] = round(time.perf_counter() - t0, 4)
         return record
@@ -448,13 +578,20 @@ def run_batch(
         "heatmap": cfg.output_dir / "heatmap",
         "masks": cfg.output_dir / "masks",
         "realityscan": cfg.output_dir / "realityscan",
+        "diagnostic": cfg.output_dir / "diagnostic",
         "logs": cfg.output_dir / "logs",
     }
     logger = RunLogger(subdirs["logs"])
 
-    device, device_note = resolve_device(cfg.device)
+    if cfg.backend == "luma":
+        # Backend B needs no GPU, no weights and no model — pure numpy/OpenCV.
+        device, device_note = "cpu", "pure-luma backend (no model / no GPU / no weights)"
+    else:
+        device, device_note = resolve_device(cfg.device)
     summary: dict = {
         "started_at": _now(),
+        "mode": cfg.mode,
+        "backend": cfg.backend,
         "model": MODEL_NAME,
         "model_version": _pkg_version(),
         "device": device,
@@ -477,7 +614,7 @@ def run_batch(
         logger.finalize(summary)
         return summary
 
-    if model is None and not cfg.dry_run:
+    if model is None and not cfg.dry_run and cfg.backend != "luma":
         ok, wdir, _ = weights_status()  # friendly, fast preflight before the slow load
         if not ok:
             raise WeightsMissingError(weights_missing_message(wdir))
@@ -517,6 +654,10 @@ def run_batch(
         if rs_excluded:
             summary["realityscan_mean_excluded_pct"] = round(sum(rs_excluded) / len(rs_excluded), 3)
             summary["realityscan_masks_written"] = len(rs_excluded)
+            summary["realityscan_warn_images"] = sum(
+                1 for p in rs_excluded if cfg.mask_warn_pct < p <= cfg.mask_danger_pct)
+            summary["realityscan_danger_images"] = sum(
+                1 for p in rs_excluded if p > cfg.mask_danger_pct)
         else:
             summary["realityscan_masks_written"] = 0
             summary["realityscan_warning"] = (

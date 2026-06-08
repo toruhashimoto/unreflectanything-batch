@@ -108,3 +108,50 @@ def test_exclusion_mask_is_strictly_binary():
     after[4:12, 4:12] = 90
     m = metrics.reflection_exclusion_mask(before, after, highlight_gate=200)
     assert set(np.unique(m).tolist()).issubset({0, 255})
+
+
+def test_exclusion_mask_return_stats():
+    # Left half darkened (a removed highlight); no morphology -> candidate == final == 50%.
+    before = _solid(255, (10, 10))
+    after = before.copy()
+    after[:, :5] = 100
+    mask, stats = metrics.reflection_exclusion_mask(
+        before, after, drop_level=12, highlight_gate=200, dilation=0, open_radius=0,
+        return_stats=True,
+    )
+    assert set(stats) == {"candidate_pixel_ratio", "final_mask_ratio"}
+    assert abs(stats["candidate_pixel_ratio"] - 50.0) < 1e-6
+    assert abs(stats["final_mask_ratio"] - 50.0) < 1e-6
+    assert int(mask[:, :5].max()) == 0 and int(mask[:, 5:].min()) == 255
+
+
+def test_exclusion_mask_default_return_is_array_not_tuple():
+    # Back-compat: without return_stats it still returns a bare array.
+    img = _solid(255)
+    out = metrics.reflection_exclusion_mask(img, img)
+    assert isinstance(out, np.ndarray)
+
+
+# --------------------------------------------------------------------------- #
+# Pure-luma exclusion mask (Backend B): same RealityScan polarity, no model    #
+# --------------------------------------------------------------------------- #
+def test_luma_mask_excludes_bright_keeps_dark():
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    img[:, :5] = 255  # left half bright (reflection)
+    m = metrics.luma_exclusion_mask(img, level=200, dilation=0, open_radius=0)
+    assert int(m[:, :5].max()) == 0      # bright -> excluded (black)
+    assert int(m[:, 5:].min()) == 255    # dark -> kept (white)
+
+
+def test_luma_mask_binary_and_stats():
+    img = np.full((8, 8, 3), 250, dtype=np.uint8)
+    m, stats = metrics.luma_exclusion_mask(
+        img, level=240, dilation=0, open_radius=0, return_stats=True
+    )
+    assert set(np.unique(m).tolist()).issubset({0, 255})
+    assert stats["candidate_pixel_ratio"] == 100.0 and stats["final_mask_ratio"] == 100.0
+
+
+def test_luma_mask_high_level_keeps_everything():
+    img = np.full((8, 8, 3), 200, dtype=np.uint8)  # below the gate
+    assert int(metrics.luma_exclusion_mask(img, level=250).min()) == 255

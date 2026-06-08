@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unreflectanything-batch"
-version = "0.1.3"
-description = "Batch specular-reflection / highlight removal (UnReflectAnything) for 3D Gaussian Splatting and photogrammetry input photos."
+version = "0.2.0"
+description = "ReflectMask for RealityScan - generate tight binary alignment masks that exclude specular reflections, protecting valid features for high-detail RealityScan/COLMAP photogrammetry. UnReflectAnything is the reflection-detection backend. (repo/package name kept: unreflectanything-batch)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Toru Hashimoto" }]
-keywords = ["3d-gaussian-splatting", "gaussian-splatting", "photogrammetry",
-            "reflection-removal", "highlight-removal", "colmap", "unreflectanything"]
+keywords = ["realityscan", "alignment-mask", "photogrammetry", "reflection-removal",
+            "highlight-removal", "colmap", "3d-gaussian-splatting", "unreflectanything"]
 classifiers = [
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3.11",
@@ -36,6 +36,7 @@ gui = ["streamlit>=1.40"]
 dev = ["pytest>=7", "pillow", "numpy"]
 
 [project.scripts]
+reflectmask = "main:main"
 unreflect-batch = "main:main"
 
 [project.urls]
