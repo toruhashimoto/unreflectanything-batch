@@ -580,45 +580,81 @@ def _free_vram_gb(device: str) -> Optional[float]:
         return None
 
 
-# AI workers each reload the ~3.4 GB model (a contended startup "storm"). Measured CLEAN
-# (no other GPU/CPU load) on 48 imgs: 4 workers = 2.3x, 8 = 2.9x (best), 16 = 0.3x
-# (DISASTER -- 16 concurrent model loads thrash disk/CUDA). So cap the worker count at the
-# measured-safe 8, and keep >= ~6 images/worker so the one-time load amortises.
-_AI_MIN_IMAGES_PER_WORKER = 6
-_AI_MAX_WORKERS = 8
+def _free_ram_gb() -> Optional[float]:
+    """Free system RAM in GB (psutil if present, else the Windows API), or None if unknown."""
+    try:
+        import psutil
+
+        return psutil.virtual_memory().available / 1e9
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # Windows fallback without psutil
+        import ctypes
+
+        class _MS(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        ms = _MS()
+        ms.dwLength = ctypes.sizeof(_MS)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+            return ms.ullAvailPhys / 1e9
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
-def resolve_workers(requested, n_images, backend, cores, free_vram_gb) -> int:
-    """Decide the worker-process count. ``requested`` None/0 = auto, else explicit.
+# Generality: derive worker limits from MEASURED machine resources (cores, free VRAM, free
+# RAM) rather than magic numbers. The ceilings below are conservative *fallbacks*, not
+# machine-tuned optima -- the resource caps usually bind first, and --workers overrides all.
+_LUMA_WORKER_CEILING = 32        # luma I/O knee (measured ~13.8x at 32); cores/RAM usually bind
+_AI_WORKER_CEILING = 16          # safe once model loads are staggered (below); VRAM/cores bind
+_AI_MIN_IMAGES_PER_WORKER = 6    # auto: amortise the one-time per-worker model load
+_MODEL_VRAM_GB = 4.5             # ~one 3.4 GB checkpoint + activations, per AI worker
+_RAM_PER_WORKER_GB = 1.5         # decode buffers (+ host model copy for AI), per worker
+# Tier 2: cap how many workers load the model AT ONCE. 16 simultaneous loads thrashed
+# disk/CUDA (measured ~3x slower); staggering removes that machine-specific startup cliff so
+# the worker count can be chosen from steady-state resources alone.
+_MAX_CONCURRENT_MODEL_LOADS = 3
 
-    Pure and injectable for testing. Always capped to <= cores, <= 61 (Windows) and
-    <= n_images. The luma backend has no model, so it parallelises freely up to the
-    disk-I/O knee. The AI backend is the catch: every worker reloads its own ~3.4 GB
-    checkpoint (a contended load storm), so a measured 24-image batch on 16 workers ran
-    ~3x SLOWER than sequential. Hence for the AI backend we cap by free VRAM, keep the
-    worker count modest, and only auto-parallelise batches big enough to amortise the
-    per-worker model load (so small AI batches stay sequential -- no regression).
+
+def resolve_workers(requested, n_images, backend, cores, free_vram_gb, free_ram_gb) -> int:
+    """Decide the worker-process count from measured resources. Pure / injectable.
+
+    ``requested`` None/0 = auto, else explicit. These limits apply to BOTH auto and explicit
+    (so an explicit value can never OOM or oversubscribe): <= cores, <= 61 (Windows),
+    <= n_images, <= free_RAM / per-worker, and (AI) <= free_VRAM / per-model. Auto adds a
+    conservative throughput ceiling and, for the AI backend, requires enough images to
+    amortise the per-worker model load. The load *storm* is handled separately by staggering
+    (see _MAX_CONCURRENT_MODEL_LOADS), so these caps are about steady-state resources, not
+    the startup cliff -- which is why they can be resource-derived rather than hand-tuned.
     """
     if n_images <= 1:
         return 1
-    hard = max(1, min(int(cores), _MAX_WORKERS_HARD, n_images))
-    if backend == "luma":
-        if requested and int(requested) > 0:
-            return min(int(requested), hard)
-        return min(hard, 32)  # measured: still gaining at 32 (13.8x); disk-I/O bound past it
-    # AI backend: free-VRAM cap (~one model + headroom per worker) guards against OOM.
-    vram_cap = int(free_vram_gb / 4.5) if free_vram_gb else _AI_MAX_WORKERS
+    ceilings = [max(1, min(int(cores), _MAX_WORKERS_HARD, n_images))]
+    if free_ram_gb:
+        ceilings.append(max(1, int(free_ram_gb / _RAM_PER_WORKER_GB)))
+    if backend != "luma":
+        ceilings.append(max(1, int(free_vram_gb / _MODEL_VRAM_GB)) if free_vram_gb
+                        else _AI_WORKER_CEILING)
     if requested and int(requested) > 0:
-        return max(1, min(int(requested), hard, vram_cap))  # respect user, but never OOM
-    amortised = n_images // _AI_MIN_IMAGES_PER_WORKER  # 0 for small batches -> sequential
-    return max(1, min(hard, vram_cap, _AI_MAX_WORKERS, amortised))
+        return max(1, min(int(requested), *ceilings))
+    # auto: add the conservative throughput ceiling (+ AI load amortisation)
+    if backend == "luma":
+        ceilings.append(_LUMA_WORKER_CEILING)
+    else:
+        ceilings.append(_AI_WORKER_CEILING)
+        ceilings.append(max(1, n_images // _AI_MIN_IMAGES_PER_WORKER))
+    return max(1, min(ceilings))
 
 
 # Per-worker state (each process loads its own model once, via the pool initializer).
 _WORKER: dict = {}
 
 
-def _worker_init(cfg: "BatchConfig", device: str, subdirs: dict, tmp_dir: str) -> None:
+def _worker_init(cfg: "BatchConfig", device: str, subdirs: dict, tmp_dir: str, load_sem=None) -> None:
     # Weights are local; never let a worker hang on a HuggingFace network probe.
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -626,7 +662,13 @@ def _worker_init(cfg: "BatchConfig", device: str, subdirs: dict, tmp_dir: str) -
     _WORKER["device"] = device
     _WORKER["subdirs"] = {k: Path(v) for k, v in subdirs.items()}
     _WORKER["tmp_dir"] = Path(tmp_dir)
-    _WORKER["model"] = None if cfg.backend == "luma" else load_model(device)
+    if cfg.backend == "luma":
+        _WORKER["model"] = None
+    elif load_sem is not None:
+        with load_sem:  # stagger: only _MAX_CONCURRENT_MODEL_LOADS workers load at once
+            _WORKER["model"] = load_model(device)
+    else:
+        _WORKER["model"] = load_model(device)
 
 
 def _worker_task(arg):
@@ -717,7 +759,7 @@ def run_batch(
         workers = 1
     else:
         workers = resolve_workers(cfg.workers, len(images), cfg.backend,
-                                  os.cpu_count() or 4, _free_vram_gb(device))
+                                  os.cpu_count() or 4, _free_vram_gb(device), _free_ram_gb())
     summary["workers"] = workers
 
     # Weights preflight (fast, friendly error) before the slow load / spawning N workers.
@@ -756,15 +798,26 @@ def run_batch(
                 _handle(i, process_one(src, cfg, model, device, tmp_dir, subdirs))
         else:
             from concurrent.futures import ProcessPoolExecutor
+            import multiprocessing as mp
 
             sub_str = {k: str(v) for k, v in subdirs.items()}
             tasks = [(i, str(s)) for i, s in enumerate(images, start=1)]
-            with ProcessPoolExecutor(
-                max_workers=workers, initializer=_worker_init,
-                initargs=(cfg, device, sub_str, str(tmp_dir)),
-            ) as ex:
-                for i, rec in ex.map(_worker_task, tasks):
-                    _handle(i, rec)
+            # Tier 2: stagger model loads (AI only) via a cross-process semaphore so workers
+            # don't all read the 3.4 GB checkpoint at once -- removes the disk/CUDA load storm
+            # (the machine-specific cliff) regardless of how many workers we run.
+            manager = mp.Manager() if cfg.backend != "luma" else None
+            load_sem = (manager.Semaphore(min(workers, _MAX_CONCURRENT_MODEL_LOADS))
+                        if manager is not None else None)
+            try:
+                with ProcessPoolExecutor(
+                    max_workers=workers, initializer=_worker_init,
+                    initargs=(cfg, device, sub_str, str(tmp_dir), load_sem),
+                ) as ex:
+                    for i, rec in ex.map(_worker_task, tasks):
+                        _handle(i, rec)
+            finally:
+                if manager is not None:
+                    manager.shutdown()
     finally:
         if bar is not None:
             bar.close()
